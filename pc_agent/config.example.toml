@@ -7,7 +7,7 @@
 pc_name   = ""                                  # 例 "PC2"
 broker    = "192.168.11.32"
 port      = 1883
-comfy_url = "http://127.0.0.1:8188"             # デスクトップ版の ComfyUI なら :8000 (ブラウザで開いたときのアドレスに合わせる)
+comfy_url = "auto"                              # 127.0.0.1 の 8000〜8009・8188 から自動で探す。決めたいときは "http://127.0.0.1:8000" など
 lhm_url   = "http://127.0.0.1:8085/data.json"   # LibreHardwareMonitor を使わないなら空文字 ""
 
 sys_interval_sec   = 5

@@ -57,7 +57,7 @@ DEFAULTS = {
     "pc_name": "",  # 既定値は持たない (見本のまま 2 台で同じ名前になると、接続と切断を繰り返すため)
     "broker": "192.168.11.32",
     "port": 1883,
-    "comfy_url": "http://127.0.0.1:8188",
+    "comfy_url": "auto",
     "lhm_url": "",
     "sys_interval_sec": 5,
     "stall_minutes": 15,
@@ -178,9 +178,12 @@ class ComfyMonitor:
 
     STATS_EVERY = 5  # /system_stats を見る間隔 (秒)
     DOWN_FAILS = 3   # これだけ続けて失敗したら down
+    # comfy_url = "auto" のときに試すポート。デスクトップ版は 8000 から (使われていると 8001… へずれる)、普通の ComfyUI は 8188
+    AUTO_PORTS = list(range(8000, 8010)) + [8188]
 
     def __init__(self, url, stall_minutes, max_job_minutes):
-        self.base = url.rstrip("/")
+        self.auto = url.strip().lower() in ("", "auto")
+        self.base = None if self.auto else url.rstrip("/")
         self.stall_sec = stall_minutes * 60
         self.max_job_sec = max_job_minutes * 60
         self.lock = threading.Lock()
@@ -204,21 +207,52 @@ class ComfyMonitor:
         self.ws_progress_at = 0.0
         self.ws = None
 
+    def _stats_ok(self, base, timeout):
+        """base が ComfyUI として応答するか (/system_stats が "system" を含む JSON を返すか)。"""
+        r = self.http.get(base + "/system_stats", timeout=timeout)
+        r.raise_for_status()
+        if "system" not in r.json():
+            raise ValueError("ComfyUI の応答ではない")
+
+    def _find_port(self):
+        """auto のとき、127.0.0.1 の候補ポートから ComfyUI を探す。見つからなければ None。"""
+        for port in self.AUTO_PORTS:
+            base = f"http://127.0.0.1:{port}"
+            try:
+                self._stats_ok(base, 0.5)  # 開いていないポートはすぐ断られるので速い
+            except Exception:
+                continue
+            if base != self.base:
+                log.info("ComfyUI を %s で見つけた", base)
+            return base
+        return None
+
     # ---- A. ポーリング
     def poll(self):
         now = time.monotonic()
         if now - self.last_stats >= self.STATS_EVERY:
             self.last_stats = now
+            err = None
             try:
-                self.http.get(self.base + "/system_stats", timeout=2).raise_for_status()
+                if self.base is None:
+                    raise ConnectionError("ComfyUI が見つからない")
+                self._stats_ok(self.base, 2)
+            except Exception as e:
+                err = e
+            # auto なら、応答しないときはポートを探し直す (ComfyUI を起動し直すとずれることがある)
+            if err and self.auto:
+                found = self._find_port()
+                if found:
+                    self.base, err = found, None
+            if err is None:
                 if not self.ever_ok or self.fails:
-                    log.info("ComfyUI が応答した")
+                    log.info("ComfyUI が応答した (%s)", self.base)
                 self.ever_ok = True
                 self.fails = 0
-            except Exception as e:
+            else:
                 self.fails += 1
                 if self.ever_ok and self.fails == self.DOWN_FAILS:
-                    log.warning("ComfyUI が応答しなくなった (%s)", e)
+                    log.warning("ComfyUI が応答しなくなった (%s)", err)
         if not self.ever_ok or self.fails:
             return
         try:
@@ -306,9 +340,11 @@ class ComfyMonitor:
         if websocket is None:
             log.warning("websocket-client が入っていないので進捗はポーリングだけで見る")
             return
-        url = re.sub(r"^http", "ws", self.base) + "/ws?clientId=" + uuid.uuid4().hex
+        client_id = uuid.uuid4().hex
         while not stop.is_set():
-            if self.ever_ok and not self.fails:
+            if self.ever_ok and not self.fails and self.base:
+                # ポートが変わることがあるので、つなぐたびに今の URL から作る
+                url = re.sub(r"^http", "ws", self.base) + "/ws?clientId=" + client_id
                 self.ws = websocket.WebSocketApp(
                     url,
                     on_open=lambda _ws: log.info("WebSocket つながった"),

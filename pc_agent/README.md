@@ -103,15 +103,16 @@ notepad config.toml
 同じ名前を 2 台に付けないこと (同じクライアント ID になり、接続と切断を繰り返します)。
 その PC の IP は `ipconfig` の「IPv4 アドレス」で分かります。
 
-**`comfy_url`** … その PC の ComfyUI のポート。ブラウザで ComfyUI を開いたときのアドレスを見ます。
+**`comfy_url`** … 見本のまま `"auto"` でかまいません。
+その PC の `127.0.0.1` の 8000〜8009 と 8188 を順に試して、ComfyUI が応答した所を使います。
 
-| ComfyUI の種類 | 書く値 |
+| ComfyUI の種類 | ポート |
 |---|---|
-| デスクトップ版 (Documents\ComfyUI に入っているもの) | `"http://127.0.0.1:8000"` |
-| 普通の ComfyUI (portable 版、git で入れたもの) | `"http://127.0.0.1:8188"` (見本のまま) |
+| デスクトップ版 (Documents\ComfyUI に入っているもの) | 8000 (使われていると 8001、8002 … へずれる) |
+| 普通の ComfyUI (portable 版、git で入れたもの) | 8188 |
 
-デスクトップ版は 8000 が使われていると 8001、8002 … へずれて起動することがあります。
-ずれた日は ComfyUI が `COMFY OFF` に見えます (ComfyUI を起動し直すと 8000 に戻ることが多い)。
+ComfyUI が応答しなくなったら探し直すので、起動し直してポートがずれても追いかけます。
+ポートを決めたいときは `"http://127.0.0.1:8000"` のように書きます (そのときはその URL だけを見ます)。
 
 `broker`・`port`・`lhm_url` などはそのままでかまいません。
 
@@ -186,6 +187,7 @@ Start-ScheduledTask -TaskName "WorkingTimer PC Agent"
 - `config.toml` と `logs\` は Git に入っていないので、pull しても PC ごとの設定は残ります。
 - `requirements.txt` が変わったときは `py -m pip install -r pc_agent\requirements.txt` もやります。
 - `config.example.toml` に新しい項目が増えたときは、必要なら `config.toml` にも書き写します (書かなければ既定値で動きます)。
+- 2026-10-17 より前に作った `config.toml` は `comfy_url = "http://127.0.0.1:8188"` になっています。デスクトップ版の ComfyUI なら `"auto"` に直します。
 
 ---
 
@@ -199,7 +201,7 @@ Start-ScheduledTask -TaskName "WorkingTimer PC Agent"
 | ログに「MQTT につながらない」が続く | ラズパイが動いているか。`config.toml` の `broker` が `192.168.11.32` か |
 | つながったり切れたりを 1 秒おきに繰り返し、WorkingTimer で何度も LOST が出る | **2 台に同じ `pc_name` を付けている** (2026-10-17 に PC1・PC2 で実際に起きた。見本の `PC1` のまま動かしていたと見られる)。同じクライアント ID を Mosquitto が取り合わせ、切られるたびに `lost` が出る。各 PC の `config.toml` を見直し、直した PC で `py agent.py --stop` → `Start-ScheduledTask` する。ログに「接続してすぐ切れるのを繰り返している」と警告が出る。ラズパイの `/var/log/mosquitto/mosquitto.log` で、同じ `pcagent_PCx` が 2 つの IP から交互に来ていれば確定 |
 | 起動してすぐ終わる・ログに「pc_name が空」 | `config.toml` の `pc_name` を書いていない |
-| ComfyUI を起動しているのに `COMFY OFF` | `comfy_url` のポートが違う。ブラウザで ComfyUI を開いたときのアドレスと合わせる (デスクトップ版は 8000〜、ずれることがある) |
+| ComfyUI を起動しているのに `COMFY OFF` | `config.toml` の `comfy_url` が古い見本の `"http://127.0.0.1:8188"` のままになっていないか (デスクトップ版は 8000〜)。`"auto"` にして動かし直す。ログに「ComfyUI を http://127.0.0.1:8000 で見つけた」と出れば OK。auto でも見つからないときは、ブラウザで ComfyUI を開いたときのポートを見て、8000〜8009・8188 以外なら URL を直接書く |
 | CPU 温度が `--` | LibreHardwareMonitor が **管理者で** 動いているか。http://127.0.0.1:8085/data.json が開けるか |
 | `step`/`steps` (進捗バー) が出ない | ブラウザから投げたジョブは、ComfyUI が進捗をエージェントに送らないことがある。状態 (RUN など) は正しく出るので問題なし |
 | シャットダウンのたびに WorkingTimer で `LOST` アラート | シャットダウンが速くて `offline` が間に合っていない。害はない (次に起動すれば `online` に戻る) |
