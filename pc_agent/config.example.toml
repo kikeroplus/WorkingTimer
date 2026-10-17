@@ -1,8 +1,10 @@
 # WorkingTimer PC エージェントの設定の見本。
 # このファイルを config.toml という名前でコピーし、pc_name をその PC の名前に書き換える。
 # PC 名は ../MQTT_TOPICS.md の表 (PC1 / PC2 / PC3) に合わせる。
+# ★ 2 台に同じ名前を付けると接続と切断を繰り返し、そのたびに WorkingTimer で LOST のアラートが出る。
+#   空のままだとエージェントは起動しない。
 
-pc_name   = "PC1"
+pc_name   = ""                                  # 例 "PC2"
 broker    = "192.168.11.32"
 port      = 1883
 comfy_url = "http://127.0.0.1:8188"             # デスクトップ版の ComfyUI なら :8000 (ブラウザで開いたときのアドレスに合わせる)

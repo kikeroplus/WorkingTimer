@@ -197,7 +197,8 @@ Start-ScheduledTask -TaskName "WorkingTimer PC Agent"
 |---|---|
 | MONITOR 画面にその PC が出ない (`--` のまま) | エージェントが動いているか ([3. 普段の操作](#3-普段の操作))。ログに「MQTT つながった」があるか。`pc_name` が PC1〜PC3 のどれかになっているか (それ以外の名前は WorkingTimer が無視する) |
 | ログに「MQTT につながらない」が続く | ラズパイが動いているか。`config.toml` の `broker` が `192.168.11.32` か |
-| つながったり切れたりを繰り返す | 2 台に同じ `pc_name` を付けていないか。同じ PC でエージェントが 2 つ動いていないか |
+| つながったり切れたりを 1 秒おきに繰り返し、WorkingTimer で何度も LOST が出る | **2 台に同じ `pc_name` を付けている** (2026-10-17 に PC1・PC2 で実際に起きた。見本の `PC1` のまま動かしていたと見られる)。同じクライアント ID を Mosquitto が取り合わせ、切られるたびに `lost` が出る。各 PC の `config.toml` を見直し、直した PC で `py agent.py --stop` → `Start-ScheduledTask` する。ログに「接続してすぐ切れるのを繰り返している」と警告が出る。ラズパイの `/var/log/mosquitto/mosquitto.log` で、同じ `pcagent_PCx` が 2 つの IP から交互に来ていれば確定 |
+| 起動してすぐ終わる・ログに「pc_name が空」 | `config.toml` の `pc_name` を書いていない |
 | ComfyUI を起動しているのに `COMFY OFF` | `comfy_url` のポートが違う。ブラウザで ComfyUI を開いたときのアドレスと合わせる (デスクトップ版は 8000〜、ずれることがある) |
 | CPU 温度が `--` | LibreHardwareMonitor が **管理者で** 動いているか。http://127.0.0.1:8085/data.json が開けるか |
 | `step`/`steps` (進捗バー) が出ない | ブラウザから投げたジョブは、ComfyUI が進捗をエージェントに送らないことがある。状態 (RUN など) は正しく出るので問題なし |

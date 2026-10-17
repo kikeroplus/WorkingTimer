@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import re
+import socket
 import sys
 import threading
 import time
@@ -53,7 +54,7 @@ PBT_APMRESUMEAUTOMATIC = 0x0012
 log = logging.getLogger("agent")
 
 DEFAULTS = {
-    "pc_name": "PC1",
+    "pc_name": "",  # 既定値は持たない (見本のまま 2 台で同じ名前になると、接続と切断を繰り返すため)
     "broker": "192.168.11.32",
     "port": 1883,
     "comfy_url": "http://127.0.0.1:8188",
@@ -362,6 +363,8 @@ class Agent:
         self.stop = threading.Event()
         self.stopped = False
         self.sleeping = False
+        self.connected_at = 0.0
+        self.quick_drops = []  # つながってすぐ切れた時刻 (同じ pc_name の PC がほかにいないかの目安)
         self.resend_comfy = threading.Event()  # 接続し直したら comfy をすぐ送り直す
 
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"pcagent_{name}")
@@ -380,11 +383,21 @@ class Agent:
             log.warning("MQTT 接続を断られた: %s", reason_code)
             return
         log.info("MQTT つながった %s:%s", self.cfg["broker"], self.cfg["port"])
+        self.connected_at = time.monotonic()
         client.publish(self.t_status, "online", qos=1, retain=True)
         self.resend_comfy.set()
 
     def on_disconnect(self, _client, _userdata, _flags, reason_code, _props):
         log.info("MQTT 切れた: %s", reason_code)
+        if self.stopped or self.sleeping:
+            return
+        # つながって 5 秒もたたずに切れるのが 1 分に 3 回以上続くのは、同じクライアント ID の取り合いのことが多い
+        now = time.monotonic()
+        if now - self.connected_at < 5:
+            self.quick_drops = [t for t in self.quick_drops if now - t < 60] + [now]
+            if len(self.quick_drops) == 3:
+                log.warning("接続してすぐ切れるのを繰り返している。ほかの PC の config.toml にも pc_name = \"%s\" が"
+                            "書かれていないか確かめる (同じ名前だと取り合いになり、そのたびに lost が出る)", self.cfg["pc_name"])
 
     def publish(self, topic, payload, qos, retain):
         # つながっていないときは送らない (古い値をため込まない。つながり直したら送り直す)
@@ -552,14 +565,19 @@ def main():
     except FileNotFoundError:
         log.error("設定ファイル %s がない。config.example.toml をコピーして作る", args.config)
         return 1
+    if not str(cfg["pc_name"]).strip():
+        log.error("config.toml の pc_name が空。この PC の名前 (PC1 / PC2 / PC3) を書く")
+        return 1
 
-    # 二重起動すると同じクライアント ID で接続と切断を繰り返すので防ぐ
-    mutex = win32event.CreateMutex(None, False, f"Local\\WorkingTimerPcAgent_{cfg['pc_name']}")
+    # 二重起動すると接続と切断を繰り返すので、1 台の PC で 1 つだけにする (pc_name を書き換えた後でも)
+    mutex = win32event.CreateMutex(None, False, "Local\\WorkingTimerPcAgent")
     if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
         log.error("もう動いているので終了する")
         return 1
 
-    log.info("起動 %s (broker %s:%s, comfy %s)", cfg["pc_name"], cfg["broker"], cfg["port"], cfg["comfy_url"])
+    # ログを見て、どの PC がどの名前で動いているか分かるようにする
+    log.info("起動 %s on %s (broker %s:%s, comfy %s)", cfg["pc_name"], socket.gethostname(),
+             cfg["broker"], cfg["port"], cfg["comfy_url"])
     agent = Agent(cfg)
     agent.start()
     try:
