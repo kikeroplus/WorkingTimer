@@ -8,9 +8,9 @@
 
   | PC 名 | IP | CPU | GPU（すべて NVIDIA） |
   |---|---|---|---|
-  | PC1 | 192.168.11.31 | Core Ultra 5 | RTX 4060 Ti 16GB |
-  | PC2 | 192.168.11.30 | Core Ultra 7 | RTX 4060 Ti 16GB |
-  | PC3 | 192.168.11.14 | Core i5-13400 | RTX 4060 8GB |
+  | PC1 | 192.168.11.31 | Core Ultra 5 | RTX 5060 Ti 16GB |
+  | PC2 | 192.168.11.30 | Core Ultra 7 | RTX 5060 Ti 16GB |
+  | PC3 | 192.168.11.14 | Core i5-13400 | RTX 5060 8GB |
 - ペイロードの文字は ASCII のみ（ESP32 のフォントが ASCII のみのため）。JSON は 1 メッセージ 400 バイト以内。
 - 数値が取れない項目は `-1` を入れる（キーは省略しない）。
 

@@ -60,7 +60,7 @@ pywin32 で **非表示のウィンドウ** を作り、次のメッセージを
 ## 3. PC の負荷と温度（`info/pc/<PC>/sys`、5 秒ごと）
 
 - CPU 使用率・メモリ使用率：psutil。
-- GPU 使用率・GPU 温度・VRAM：pynvml（NVIDIA）。3 台とも NVIDIA（RTX 4060 Ti 16GB ×2、RTX 4060 8GB ×1）なので pynvml だけでよい。
+- GPU 使用率・GPU 温度・VRAM：pynvml（NVIDIA）。3 台とも NVIDIA（RTX 5060 Ti 16GB ×2、RTX 5060 8GB ×1）なので pynvml だけでよい。
 - CPU 温度：Windows では psutil で取れない。`lhm_url` が設定されていれば LibreHardwareMonitor の
   Remote Web Server（`data.json`）から CPU パッケージ温度を探して使う。取れなければ -1。
   PC1・PC2 は Core Ultra なので、LibreHardwareMonitor は **新しい版** を使う（古い版だと温度が出ないことがある）。

@@ -1,0 +1,13 @@
+# WorkingTimer PC エージェントの設定の見本。
+# このファイルを config.toml という名前でコピーし、pc_name をその PC の名前に書き換える。
+# PC 名は ../MQTT_TOPICS.md の表 (PC1 / PC2 / PC3) に合わせる。
+
+pc_name   = "PC1"
+broker    = "192.168.11.32"
+port      = 1883
+comfy_url = "http://127.0.0.1:8188"
+lhm_url   = "http://127.0.0.1:8085/data.json"   # LibreHardwareMonitor を使わないなら空文字 ""
+
+sys_interval_sec   = 5
+stall_minutes      = 15     # 進捗が変わらない時間がこれを超えたら stalled
+max_job_minutes    = 120    # 進捗が取れない場合、1 ジョブの実行時間がこれを超えたら stalled
