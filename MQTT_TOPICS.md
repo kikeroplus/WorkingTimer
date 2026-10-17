@@ -71,11 +71,14 @@ retain=true、QoS 1。状態が変わったとき＋実行中は 2 秒ごと＋�
 
 ユーザーによる中断（interrupted）はエラー扱いしない（`idle` に戻す）。
 
+`idle` / `run` に戻ると、その PC の ComfyUI アラートは画面から自動で消える（履歴には残る）。
+PC の `lost` アラートも同様に、`online` に戻ると消える。
+
 ## 4. 呼び出しベル（既存）
 
 - `doorbell/call/device2`〜`device5`、ペイロード `ON` / `OFF` / `TIMER`、retain=false。
 - WorkingTimer は `doorbell/call/device3` を購読し（受信機 device3 と同時に反応）、タイマー終了時に同じトピックへ `TIMER` を送る。
-  WorkingTimer のクライアント ID は `workingtimer`（受信機の `doorbell_device3` と別）。
+  WorkingTimer のクライアント ID は `workingtimer-XXXX`（XXXX は MAC の末尾 4 桁。受信機の `doorbell_device3` と別で、WorkingTimer を複数台動かしても重ならない）。
 - `device4`・`device5` は空き枠。
 
 ## 5. アラートの責任分担

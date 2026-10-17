@@ -13,7 +13,7 @@
 // ---- MQTT (呼び出しベルシステムに参加する) ----
 #define MQTT_HOST         "192.168.11.32"
 #define MQTT_PORT         1883
-#define MQTT_CLIENT_ID    "workingtimer"          // 受信機の doorbell_deviceN と重ねない (同じ ID だと切断を繰り返す)
+#define MQTT_CLIENT_ID    "workingtimer"          // 後ろに MAC の末尾 4 桁を付けて使う (例 workingtimer-A1B2)。同じ ID だと切断を繰り返すので、複数台でも重ならないようにする
 #define MQTT_SUB_TOPIC    "doorbell/call/device3" // 同じ部屋の受信機と同じ (送信機のボタン B)。自分の送る TIMER は無視するのでループしない
 #define MQTT_DONE_TOPIC   "doorbell/call/device3" // タイマー終了時に鳴らす受信機
 #define MQTT_DONE_PAYLOAD "TIMER"
@@ -444,6 +444,8 @@ struct Alert
   char detail[48]; // 小さく出す (例 "KSampler OutOfMemoryError")
   char at[6];      // 起きた時刻 HH:MM
   bool quiet;      // 軽い音 1 回だけ (BROKER LOST)
+  int8_t pc;       // どの PC のものか (-1 = PC に関係しない)
+  uint8_t kind;    // AL_* (0 = 自動では消さない)
   uint32_t shownAt; // 最初に画面に出した時刻 (0 = まだ)。警告音はここから数える
 };
 Alert alertCur;
@@ -2077,9 +2079,11 @@ const char *pcStatusName(PcStatus s)
 }
 
 // アラートを積む (画面と音は loop() 側の updateAlarm()・drawScene() が出す)
-void raiseAlert(const char *title, const char *detail, bool quiet)
+void raiseAlert(const char *title, const char *detail, bool quiet, int pc = -1, uint8_t kind = 0)
 {
   Alert a = {};
+  a.pc = pc;
+  a.kind = kind;
   strlcpy(a.title, title, sizeof(a.title));
   strlcpy(a.detail, detail, sizeof(a.detail));
   nowHHMM(a.at);
@@ -2110,6 +2114,21 @@ void raiseAlert(const char *title, const char *detail, bool quiet)
 
   if (ALERT_RING_BELL && !quiet && mqtt.connected())
     mqtt.publish(MQTT_DONE_TOPIC, MQTT_DONE_PAYLOAD, false);
+}
+
+// 正常に戻ったので、その PC の該当するアラートを表示中・保留から取り除く (履歴には残す)
+void retractAlerts(int pc, uint8_t kinds)
+{
+  int n = 0;
+  for (int j = 0; j < alertQueueN; j++)
+    if (!(alertQueue[j].pc == pc && (alertQueue[j].kind & kinds)))
+      alertQueue[n++] = alertQueue[j];
+  alertQueueN = n;
+  if (alertActive && alertCur.pc == pc && (alertCur.kind & kinds))
+  {
+    Serial.printf("alert: recovered %s\n", alertCur.title);
+    closeAlert();
+  }
 }
 
 // info/pc/<PC>/<種類> を PC ごとの構造体に写す
@@ -2143,7 +2162,7 @@ void handlePcMessage(const char *topic, const byte *payload, unsigned int len)
       {
         char title[20];
         sprintf(title, "%s LOST", PC_NAMES[i]);
-        raiseAlert(title, "UNEXPECTED DISCONNECT", false);
+        raiseAlert(title, "UNEXPECTED DISCONNECT", false, i, AL_LOST);
         pc.alerted |= AL_LOST;
       }
       pc.status = s;
@@ -2151,7 +2170,10 @@ void handlePcMessage(const char *topic, const byte *payload, unsigned int len)
       Serial.printf("pc: %s status %s%s\n", PC_NAMES[i], pcStatusName(s), pc.statusBase ? "" : " (base)");
     }
     if (s == PS_ONLINE)
+    {
       pc.alerted &= ~AL_LOST; // 正常に戻ったので、次の lost はまた知らせる
+      retractAlerts(i, AL_LOST);
+    }
     pc.statusBase = true;
     return;
   }
@@ -2223,7 +2245,7 @@ void handlePcMessage(const char *topic, const byte *payload, unsigned int len)
             formatSpan(span, pc.el / 60);
           snprintf(detail, sizeof(detail), "%s %s", pc.node, span);
         }
-        raiseAlert(title, detail, false);
+        raiseAlert(title, detail, false, i, kind);
         pc.alerted |= kind;
       }
       pc.comfy = st;
@@ -2231,7 +2253,10 @@ void handlePcMessage(const char *topic, const byte *payload, unsigned int len)
       Serial.printf("pc: %s comfy st=%d node=%s err=%s%s\n", PC_NAMES[i], st, pc.node, pc.err, pc.comfyBase ? "" : " (base)");
     }
     if (st == CS_IDLE || st == CS_RUN)
+    {
       pc.alerted &= ~AL_COMFY; // 正常に戻ったので、次のエラーなどはまた知らせる
+      retractAlerts(i, AL_COMFY);
+    }
     pc.comfyBase = true;
   }
 }
@@ -2299,7 +2324,13 @@ void mqttUpdate()
       return;
     lastTry = millis();
     Serial.printf("mqtt: connecting to %s:%d ...\n", MQTT_HOST, MQTT_PORT);
-    if (!mqtt.connect(MQTT_CLIENT_ID))
+    static char clientId[24] = "";
+    if (!clientId[0])
+    {
+      uint64_t mac = ESP.getEfuseMac(); // 下位バイトから MAC の 1 バイト目
+      snprintf(clientId, sizeof(clientId), MQTT_CLIENT_ID "-%02X%02X", (uint8_t)(mac >> 32), (uint8_t)(mac >> 40));
+    }
+    if (!mqtt.connect(clientId))
     {
       retryMs = retryMs ? min(retryMs * 2, (uint32_t)30000) : 5000;
       Serial.printf("mqtt: connect failed (state %d), retry in %lus\n", mqtt.state(), (unsigned long)(retryMs / 1000));
@@ -2311,7 +2342,7 @@ void mqttUpdate()
     // retain で届く古い値を誤報にしないよう、接続のたびに基準値を取り直す
     for (PcInfo &pc : pcs)
       pc.statusBase = pc.comfyBase = false;
-    Serial.println("mqtt: connected");
+    Serial.printf("mqtt: connected as %s\n", clientId);
     // 再接続のたびに購読し直す
     for (const char *topic : MQTT_SUBS)
     {
