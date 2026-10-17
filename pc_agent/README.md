@@ -1,83 +1,180 @@
-# WorkingTimer PC エージェント
+# WorkingTimer PC エージェント 手順書
 
-PC の負荷・温度と ComfyUI の状態を MQTT で WorkingTimer (ESP32) に送る常駐プログラムです。
-PC1〜PC3 の各 PC に同じものを入れ、`config.toml` の PC 名だけ変えて動かします。
+PC の負荷・温度と ComfyUI の状態を、MQTT で WorkingTimer (ESP32) に送る常駐プログラムです。
+PC1〜PC3 に同じものを入れ、`config.toml` だけ PC ごとに変えて動かします。
 
-- 送る内容とトピックは [../MQTT_TOPICS.md](../MQTT_TOPICS.md) のとおりです。
-- アラート (画面・音) を出すかどうかは WorkingTimer が決めます。エージェントは状態をそのまま送るだけです。
+久しぶりに作業するときは、上から順に読めば済むように書いてあります。
 
-## 入れ方 (1 台ごと)
+- [1. 全体の形](#1-全体の形)
+- [2. 新しい PC に入れる](#2-新しい-pc-に入れる) (初めての PC、入れ直し)
+- [3. 普段の操作](#3-普段の操作) (止める・動かす・ログを見る)
+- [4. 更新する](#4-更新する) (GitHub の変更を取り込む)
+- [5. うまくいかないとき](#5-うまくいかないとき)
+- [6. PC ごとのメモ](#6-pc-ごとのメモ)
+- [7. 仕組みの参考](#7-仕組みの参考)
 
-1. **Python 3.11 以上** と **Git** を入れます (Python は python.org の Windows 版。インストール時に「py launcher」を入れておく)。
-2. リポジトリを、OneDrive で同期されない決まった場所に clone します。3 台とも同じ場所にそろえます。
+---
 
-   ```powershell
-   mkdir C:\Tools
-   cd C:\Tools
-   git clone https://github.com/kikeroplus/WorkingTimer.git
-   cd WorkingTimer\pc_agent
-   ```
+## 1. 全体の形
 
-   デスクトップやドキュメントは OneDrive で同期されていることが多く、ログの書き込み中にファイルをつかまれることがあるので避けます。
-   開発している PC でも、開発用のフォルダとは別に clone したものを動かします (書きかけのコードが動かないように)。
+```
+各 PC (PC1 / PC2 / PC3)                          ラズパイ (192.168.11.32)          WorkingTimer
+┌───────────────────────────────────┐          ┌──────────────┐          ┌────────────┐
+│ ComfyUI (127.0.0.1:8000 か 8188)   │◀─見る──┐ │              │          │            │
+│ LibreHardwareMonitor (:8085)       │◀─見る──┤ │  Mosquitto   │──送る──▶│ MONITOR 画面 │
+│ エージェント (pythonw agent.py)     │────────┴▶│  :1883       │          │ アラート     │
+└───────────────────────────────────┘   送る    └──────────────┘          └────────────┘
+```
 
-3. ライブラリを入れます。
+- エージェントは **自分の PC の** ComfyUI と LibreHardwareMonitor だけを見ます (`127.0.0.1` = その PC 自身)。
+- アラートを出すかどうかは WorkingTimer が決めます。エージェントは状態をそのまま送るだけです。
+- 送る内容とトピックは [../MQTT_TOPICS.md](../MQTT_TOPICS.md) が唯一の正です。
 
-   ```powershell
-   py -m pip install -r requirements.txt
-   ```
+### ファイルの置き場所
 
-4. `config.example.toml` を `config.toml` という名前でコピーし、`pc_name` をその PC の名前にします。
+どの PC も **`C:\Tools\WorkingTimer`** に GitHub から clone して、その中の `pc_agent` から動かします。
 
-   | PC 名 | IP |
-   |---|---|
-   | PC1 | 192.168.11.31 |
-   | PC2 | 192.168.11.30 |
-   | PC3 | 192.168.11.14 |
+```
+C:\Tools\WorkingTimer\           ← git clone したもの (3 台とも同じ場所)
+  pc_agent\
+    agent.py                     本体
+    config.example.toml          設定の見本
+    config.toml                  ★ その PC だけで作る設定 (Git に入らない)
+    requirements.txt             使うライブラリ
+    register_task.ps1            自動起動の登録・解除
+    logs\agent.log               ★ ログ (Git に入らない)
+```
 
-   同じ名前を 2 台に付けないでください (同じクライアント ID になり、接続と切断を繰り返します)。
+- **デスクトップやドキュメントには置かない**：OneDrive で同期されていることが多く、ログを書いている最中にファイルをつかまれることがあります。
+- **開発している PC でも、開発用のフォルダとは別に clone したものを動かす**：書きかけのコードが動いてしまわないように。
+- **登録した後はフォルダを動かさない**：自動起動はフルパスで登録されます。動かしたら登録し直します。
 
-5. CPU 温度も送るなら、**LibreHardwareMonitor** を入れます (下記)。使わないなら `lhm_url = ""` にします。
-6. まず画面付きで動かして確かめます。
+---
 
-   ```powershell
-   py agent.py
-   ```
+## 2. 新しい PC に入れる
 
-   ログに「MQTT つながった」と出て、ラズパイの `mosquitto_sub -h localhost -t "info/#" -v` に
-   `info/pc/PC1/status online` と、5 秒ごとの `sys` が流れれば OK です。Ctrl+C で止めます (`offline` を送ってから終わります)。
+PowerShell で、上から順にやります。全部で 10〜15 分くらいです。
 
-7. 自動起動を登録します (下記)。
+### 2-1. Python と Git があるか確かめる
 
-## CPU 温度 (LibreHardwareMonitor)
+```powershell
+py --version     # Python 3.11 以上ならよい
+git --version
+```
+
+ないときは入れます。
+- Python：https://www.python.org/downloads/windows/ (インストール画面で「py launcher」にチェック)
+- Git：https://git-scm.com/download/win
+
+### 2-2. clone する
+
+```powershell
+mkdir C:\Tools -Force
+cd C:\Tools
+git clone https://github.com/kikeroplus/WorkingTimer.git
+cd WorkingTimer\pc_agent
+```
+
+リポジトリが非公開なら、初めての PC ではブラウザが開いて GitHub へのログインを求められます。一度ログインすれば次からは聞かれません。
+
+### 2-3. ライブラリを入れる
+
+```powershell
+py -m pip install -r requirements.txt
+```
+
+### 2-4. 設定ファイルを作る
+
+```powershell
+copy config.example.toml config.toml
+notepad config.toml
+```
+
+書き換えるのは次の 2 か所です。
+
+**`pc_name`** … その PC の名前。
+
+| PC 名 | IP | CPU | GPU |
+|---|---|---|---|
+| PC1 | 192.168.11.31 | Core Ultra 5 | RTX 5060 Ti 16GB |
+| PC2 | 192.168.11.30 | Core Ultra 7 | RTX 5060 Ti 16GB |
+| PC3 | 192.168.11.14 | Core i5-13400 | RTX 5060 8GB |
+
+同じ名前を 2 台に付けないこと (同じクライアント ID になり、接続と切断を繰り返します)。
+その PC の IP は `ipconfig` の「IPv4 アドレス」で分かります。
+
+**`comfy_url`** … その PC の ComfyUI のポート。ブラウザで ComfyUI を開いたときのアドレスを見ます。
+
+| ComfyUI の種類 | 書く値 |
+|---|---|
+| デスクトップ版 (Documents\ComfyUI に入っているもの) | `"http://127.0.0.1:8000"` |
+| 普通の ComfyUI (portable 版、git で入れたもの) | `"http://127.0.0.1:8188"` (見本のまま) |
+
+デスクトップ版は 8000 が使われていると 8001、8002 … へずれて起動することがあります。
+ずれた日は ComfyUI が `COMFY OFF` に見えます (ComfyUI を起動し直すと 8000 に戻ることが多い)。
+
+`broker`・`port`・`lhm_url` などはそのままでかまいません。
+
+### 2-5. CPU 温度のために LibreHardwareMonitor を入れる (任意)
 
 Windows では CPU 温度を普通には取れないので、LibreHardwareMonitor の Web サーバーから読みます。
+入れない場合は `config.toml` の `lhm_url = ""` にします (CPU 温度が `--` になるだけで、ほかは動きます)。
 
 1. https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases から **新しい版** を入れます。
    PC1・PC2 は Core Ultra なので、古い版だと温度が出ないことがあります。
-2. LibreHardwareMonitor を **管理者として** 起動し、`Options` → `Remote Web Server` → `Run` にチェックを入れます (ポートは 8085 のまま)。
-3. `Options` で `Start Minimized`・`Minimize To Tray`・`Run On Windows Startup` を入れておくと、ログオン時に勝手に動きます。
+2. **管理者として** 起動し、`Options` → `Remote Web Server` → `Run` にチェック (ポートは 8085 のまま)。
+3. `Options` で `Start Minimized`・`Minimize To Tray`・`Run On Windows Startup` にチェック (ログオン時に勝手に動く)。
 4. ブラウザで http://127.0.0.1:8085/data.json が開ければ準備完了です。
 
-温度は「CPU の Temperatures の中で名前に Package を含むもの → なければいちばん高いもの」を送ります。
-読めないときは `cpu_t` が -1 になり、WorkingTimer では `--` と表示されます。
+### 2-6. 手で動かして確かめる
 
-## 自動起動 (タスクスケジューラ)
+```powershell
+py agent.py
+```
 
-ログオンしたらウィンドウなし (`pythonw`) で動くように登録します。
+ログが画面に出ます。次の 2 つを確かめたら **Ctrl+C** で止めます (`offline` を送ってから終わります)。
+
+- 「MQTT つながった」と出る。
+- WorkingTimer の MONITOR 画面に、その PC の状態ランプ (緑) と CPU・GPU の値が出る。
+  ComfyUI を起動していれば `IDLE`、していなければ `COMFY OFF`。
+
+### 2-7. 自動起動を登録する
+
+ログオンしたら、ウィンドウなし (`pythonw`) で自動で動くようにします。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File register_task.ps1
-Start-ScheduledTask -TaskName "WorkingTimer PC Agent"   # 今すぐ動かす
+Start-ScheduledTask -TaskName "WorkingTimer PC Agent"     # 再起動せずに今すぐ動かす
 ```
 
 - 「アクセスが拒否されました」と出たら、PowerShell を **管理者として** 開いてやり直します。
-- 登録される内容：ログオン時に起動、バッテリーでも止めない、実行時間の制限なし、落ちたら 1 分後に 3 回まで再起動、二重起動しない。
-- 解除するとき：`powershell -ExecutionPolicy Bypass -File register_task.ps1 -Unregister`
-- 手で登録するときは、タスクスケジューラで「操作」を `pythonw.exe` のフルパス (例 `C:\Users\<名前>\AppData\Local\Programs\Python\Python311\pythonw.exe`)、
-  引数を `agent.py`、「開始」をこのフォルダにし、「条件」タブの「AC 電源の場合のみ」を外します。
+- 登録される内容：ログオン時に起動、バッテリーでも止めない、実行時間の制限なし、落ちたら 1 分後に 3 回まで起動し直す、二重起動しない。
+- スタートアップフォルダは使いません (タスクのほうが、落ちたときの起動し直しなどを設定できるため)。
 
-## 更新する
+これで終わりです。[6. PC ごとのメモ](#6-pc-ごとのメモ) に、その PC のことを書き足しておくと次が楽です。
+
+---
+
+## 3. 普段の操作
+
+`C:\Tools\WorkingTimer\pc_agent` で PowerShell を開いて使います。
+
+| やりたいこと | コマンド |
+|---|---|
+| 止める | `py agent.py --stop` (`offline` を送ってから終わる) |
+| 動かす | `Start-ScheduledTask -TaskName "WorkingTimer PC Agent"` |
+| 画面付きで動かす (様子を見たいとき) | 止めてから `py agent.py` (Ctrl+C で終わる) |
+| ログを見る | `notepad logs\agent.log` (1MB ごとに 3 世代まで残る) |
+| 動いているか確かめる | `Get-ScheduledTask -TaskName "WorkingTimer PC Agent"` の State が Running |
+| 自動起動をやめる | `powershell -ExecutionPolicy Bypass -File register_task.ps1 -Unregister` |
+
+二重に起動しようとすると、後から起動したほうが「もう動いているので終了する」とログに書いて終わります (害はありません)。
+
+---
+
+## 4. 更新する
+
+GitHub のプログラムが新しくなったら、各 PC で次をやります。
 
 ```powershell
 cd C:\Tools\WorkingTimer
@@ -86,60 +183,92 @@ py pc_agent\agent.py --stop
 Start-ScheduledTask -TaskName "WorkingTimer PC Agent"
 ```
 
-- `config.toml` と `logs\` は Git に入れていないので、pull しても PC ごとの設定は残ります。
+- `config.toml` と `logs\` は Git に入っていないので、pull しても PC ごとの設定は残ります。
 - `requirements.txt` が変わったときは `py -m pip install -r pc_agent\requirements.txt` もやります。
-- タスクはフルパスで登録しているので、フォルダを動かしたら `register_task.ps1` で登録し直します。
+- `config.example.toml` に新しい項目が増えたときは、必要なら `config.toml` にも書き写します (書かなければ既定値で動きます)。
 
-## 止める・様子を見る
+---
 
-- 止める：`py agent.py --stop` (動いているエージェントに終了を伝え、`offline` を送ってから終わります)。
-- ログ：`logs\agent.log` (1MB ごとに 3 世代まで残します)。
-- 二重に起動しようとすると、後から起動したほうが「もう動いているので終了する」とログに書いて終わります。
+## 5. うまくいかないとき
 
-## 電源イベント
+まず `logs\agent.log` を見ます。
+
+| 症状 | 見るところ・直し方 |
+|---|---|
+| MONITOR 画面にその PC が出ない (`--` のまま) | エージェントが動いているか ([3. 普段の操作](#3-普段の操作))。ログに「MQTT つながった」があるか。`pc_name` が PC1〜PC3 のどれかになっているか (それ以外の名前は WorkingTimer が無視する) |
+| ログに「MQTT につながらない」が続く | ラズパイが動いているか。`config.toml` の `broker` が `192.168.11.32` か |
+| つながったり切れたりを繰り返す | 2 台に同じ `pc_name` を付けていないか。同じ PC でエージェントが 2 つ動いていないか |
+| ComfyUI を起動しているのに `COMFY OFF` | `comfy_url` のポートが違う。ブラウザで ComfyUI を開いたときのアドレスと合わせる (デスクトップ版は 8000〜、ずれることがある) |
+| CPU 温度が `--` | LibreHardwareMonitor が **管理者で** 動いているか。http://127.0.0.1:8085/data.json が開けるか |
+| `step`/`steps` (進捗バー) が出ない | ブラウザから投げたジョブは、ComfyUI が進捗をエージェントに送らないことがある。状態 (RUN など) は正しく出るので問題なし |
+| シャットダウンのたびに WorkingTimer で `LOST` アラート | シャットダウンが速くて `offline` が間に合っていない。害はない (次に起動すれば `online` に戻る) |
+| 自動起動の登録で「アクセスが拒否されました」 | PowerShell を管理者として開いて `register_task.ps1` をやり直す |
+| `py` が見つからない | Python を入れ直し、「py launcher」にチェックを入れる |
+
+ラズパイで実際に流れているものを見るとき：
+
+```bash
+ssh pi@raspi1
+mosquitto_sub -h localhost -t "info/#" -v
+```
+
+---
+
+## 6. PC ごとのメモ
+
+入れたら書き足していきます。
+
+| PC | 入れた日 | ComfyUI (comfy_url) | LibreHardwareMonitor | 自動起動 | メモ |
+|---|---|---|---|---|---|
+| PC1 | | | | | |
+| PC2 | | | | | |
+| PC3 | | デスクトップ版 → `:8000` (8001〜にずれることあり) | | | 開発に使っている PC。開発フォルダ (デスクトップ) とは別に `C:\Tools` へ clone して動かす |
+
+---
+
+## 7. 仕組みの参考
+
+### 送るもの
+
+| トピック | 中身 | いつ |
+|---|---|---|
+| `info/pc/<PC>/status` | `online` / `offline` / `sleep` / `lost` | 状態が変わったとき (retain) |
+| `info/pc/<PC>/sys` | CPU・メモリ・GPU の使用率と温度、VRAM | 5 秒ごと |
+| `info/pc/<PC>/comfy` | ComfyUI の状態 (下表) | 変わったとき、実行中は 2 秒ごと、それ以外は 30 秒ごと (retain) |
+
+### PC の状態 (status)
 
 見えないウィンドウを作って Windows からの知らせを受けています。
 
 | 出来事 | 送るもの |
 |---|---|
+| 起動してつながった | `online` |
 | 普通に終了・Ctrl+C・`--stop` | `offline` |
 | シャットダウン・ログオフ | `offline` |
 | スリープに入る | `sleep` を送って MQTT を切断 (つないだまま眠ると 45 秒後に `lost` になるため) |
 | スリープから戻る | つなぎ直して `online` |
-| フリーズ・強制終了・停電・LAN 断 | (送れないので) ブローカーが `lost` を出す |
+| フリーズ・強制終了・停電・LAN 断 | (送れないので) ブローカーが `lost` を出す → WorkingTimer でアラート |
 
-シャットダウンが速すぎて `offline` が間に合わなかったときは、`lost` になります (WorkingTimer でアラートが出ます)。
 Modern Standby (S0 スリープ) の PC では、スリープの知らせが来ないことがあります。
 
-## ComfyUI の状態
+### ComfyUI の状態 (comfy の `st`)
 
 2 秒ごとに `/queue` を見て、実行中のジョブが終わったら `/history` で結果を確かめます。
 
-| 送る `st` | いつ |
-|---|---|
-| `off` | エージェントの起動以来、ComfyUI が一度も応答していない |
-| `idle` | 応答あり、実行中のジョブなし |
-| `run` | 実行中 |
-| `error` | 直近のジョブがエラーで終わった (次のジョブが始まるまで続く) |
-| `down` | 応答していたのに 3 回続けて (約 15 秒) 応答しない |
-| `stalled` | 実行中なのに進捗が `stall_minutes` 分変わらない (進捗が取れないときは 1 ジョブが `max_job_minutes` 分を超えた) |
+| `st` | いつ | WorkingTimer のアラート |
+|---|---|---|
+| `off` | エージェントの起動以来、ComfyUI が一度も応答していない | なし |
+| `idle` | 応答あり、実行中のジョブなし | なし |
+| `run` | 実行中 | なし |
+| `error` | 直近のジョブがエラーで終わった (次のジョブが始まるまで続く) | あり |
+| `down` | 応答していたのに 3 回続けて (約 15 秒) 応答しない | あり |
+| `stalled` | 実行中なのに進捗が `stall_minutes` 分変わらない (進捗が取れないときは 1 ジョブが `max_job_minutes` 分を超えた) | あり |
 
 ユーザーが中断したジョブはエラーにせず `idle` に戻します。
 
-進捗 (`step`/`steps`) と実行中のノード名は WebSocket から受け取ります。ComfyUI は進捗を「ジョブを投げたクライアント」にしか
-送らないことがあるので、ブラウザから投げたジョブでは `step` が -1 のままになるかもしれません。その場合も状態の判定は
-`/queue` と `/history` だけで動きます (stalled は `max_job_minutes` で判断)。
+進捗 (`step`/`steps`) と実行中のノード名は WebSocket から受け取ります。届かない場合も状態の判定は `/queue` と `/history` だけで動きます。
 
-## 動作確認
+### もっと詳しく
 
-ラズパイで `mosquitto_sub -h localhost -t "info/#" -v` を開いておき、PC_AGENT_TASK.md の「6. 動作確認」を順に試します。
-
-## ファイル
-
-| ファイル | 内容 |
-|---|---|
-| `agent.py` | 本体 |
-| `config.example.toml` | 設定の見本 (`config.toml` にコピーして使う。`config.toml` は Git に入れない) |
-| `requirements.txt` | 使うライブラリ |
-| `register_task.ps1` | タスクスケジューラへの登録・解除 |
-| `logs/` | ログ (Git に入れない) |
+- 仕様：[PC_AGENT_TASK.md](PC_AGENT_TASK.md)、[../MQTT_TOPICS.md](../MQTT_TOPICS.md)
+- 動作確認の手順：[PC_AGENT_TASK.md の「6. 動作確認」](PC_AGENT_TASK.md)
