@@ -60,12 +60,12 @@ ID が重なると「接続→切断」が無限に繰り返されるので、Wo
 #define MQTT_HOST        "192.168.11.32"
 #define MQTT_PORT        1883
 #define MQTT_CLIENT_ID   "workingtimer"            // 受信機の doorbell_deviceN と重ねない
-#define MQTT_SUB_TOPIC   "doorbell/call/device4"   // ★要確認：WorkingTimer が反応する呼び出し
-#define MQTT_DONE_TOPIC  "doorbell/call/device2"   // ★要確認：タイマー終了時に鳴らす受信機
+#define MQTT_SUB_TOPIC   "doorbell/call/device3"   // 決定：受信機 device3 と同じ（送信機のボタン B で両方が反応）
+#define MQTT_DONE_TOPIC  "doorbell/call/device3"   // 決定：タイマー終了時は受信機 device3 を鳴らす
 #define MQTT_DONE_PAYLOAD "TIMER"
 ```
 
-  ★の2つはユーザーと最終確認すること（下の「8. 未決事項」参照）。
+  購読と送信が同じトピックになるが、自分の送った `TIMER` は無視するのでループしない。
 - `mqtt.setBufferSize(1024)` を `connect()` より前に呼び、戻り値が false なら Serial に警告を出す。
 - `setSocketTimeout()` や `WiFiClient::setTimeout()` を使い、ブローカーが落ちているときに `connect()` が長く固まらないようにする（目安 2 秒以内）。
 
@@ -139,10 +139,10 @@ ID が重なると「接続→切断」が無限に繰り返されるので、Wo
 1. 監視用ターミナル：`mosquitto_sub -h localhost -t "doorbell/#" -v`
 2. 接続：WorkingTimer 起動後、Serial に接続と購読のログが出て、画面の `MQ` が点灯すること。
    ブローカーのログ `sudo tail -f /var/log/mosquitto/mosquitto.log` に切断の繰り返しが出ていないこと。
-3. 呼び出し：`mosquitto_pub -h localhost -t "doorbell/call/device4" -m "ON"`
+3. 呼び出し：`mosquitto_pub -h localhost -t "doorbell/call/device3" -m "ON"`
    → CALL 表示・呼び出し音・RUNNING なら一時停止。ボタン短押しで閉じ、その押下でタイマーが動かないこと。
 4. 無視の確認：同じトピックに `OFF`、`TIMER` を送っても何も起きないこと。
-5. 終了通知：1 分プリセットで完走 → 監視ターミナルに `doorbell/call/device2 TIMER` が 1 回だけ出て、受信機がタイマー用パターンで鳴ること。
+5. 終了通知：1 分プリセットで完走 → 監視ターミナルに `doorbell/call/device3 TIMER` が 1 回だけ出て、受信機がタイマー用パターンで鳴ること。
 6. 通知 OFF：同時長押しで OFF → 完走しても publish されないこと。再起動後も設定が残ること。
 7. 切断耐性：ラズパイで `sudo systemctl stop mosquitto` → タイマー・表示・ボタンが固まらずに動き続けること。
    `start` に戻すと自動で再接続・再購読されること。
@@ -161,8 +161,8 @@ ID が重なると「接続→切断」が無限に繰り返されるので、Wo
 - 天気や PC 状態などの情報表示（将来、`info/...` トピックで受ける予定。今回の構成はそれを妨げないようにだけしておく）。
 - 呼び出しベルシステム側の変更。
 
-## 8. 未決事項（着手前にユーザーに確認）
+## 8. 決定事項（実装済み）
 
-1. `MQTT_SUB_TOPIC`：空いている device4 を WorkingTimer に割り当てる（送信機のボタン C で呼ぶ）か、同じ部屋の受信機と同じトピックにするか。
-   後者で `MQTT_DONE_TOPIC` と同じトピックになる場合でも、`TIMER` を無視するのでループはしない。
-2. `MQTT_DONE_TOPIC`：タイマー終了時に鳴らすのは device2 か device3 か両方か。両方なら publish を 2 回行う。
+1. `MQTT_SUB_TOPIC` = `doorbell/call/device3`：受信機 device3 と同じ部屋にあり、送信機のボタン B で両方が同時に反応する。
+2. `MQTT_DONE_TOPIC` = `doorbell/call/device3`：タイマー終了時は受信機 device3 をタイマー用パターンで鳴らす。
+   WorkingTimer 自身もこの `TIMER` を受け取るが、無視する。

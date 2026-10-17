@@ -5,6 +5,7 @@
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include <time.h>
 #include <font/glcdfont.h>
 #include "secrets.h"
@@ -255,7 +256,6 @@ int presetIdx = 3; // 25 分
 uint32_t totalMs = 0;
 uint32_t remainMs = 0; // READY / PAUSED のときの残り
 uint32_t endAt = 0;    // RUNNING のときの終了時刻 (millis)
-uint32_t doneAt = 0;
 // 表示モード (SELECT 長押しで順に切り替え)
 enum ViewMode
 {
@@ -264,6 +264,8 @@ enum ViewMode
   VIEW_ANALOG_TIMER, // アナログ時計 + 右に残り時間の数字
   VIEW_ANALOG_ALL,   // アナログ時計 + 右に残り時間と現在時刻の両方
   VIEW_DASH,         // アナログ時計 + 残り時間・日の入り・ポモドーロ記録・砂時計・今日の豆知識
+  VIEW_MONITOR,      // PC1〜PC3 の負荷・温度と ComfyUI の状態
+  VIEW_WIFI,         // 2.4GHz の混み具合 (ch ごとの棒グラフと強い AP)
   VIEW_N
 };
 uint8_t viewMode = VIEW_DIGITAL;
@@ -369,6 +371,94 @@ bool notifyEnabled = true; // OFF のときは送らない (1 分タイマーの
 bool donePending = false;  // 送信待ち (終了の瞬間に MQTT が切れていたとき)
 uint32_t donePendingAt = 0;
 
+// ---- PC の監視 (info/pc/<PC>/status・sys・comfy。仕様は MQTT_TOPICS.md) ----
+const char *PC_NAMES[] = {"PC1", "PC2", "PC3"}; // 台数を変えるときはここだけ直す
+const int PC_N = sizeof(PC_NAMES) / sizeof(PC_NAMES[0]);
+const uint32_t SYS_STALE_MS = 20000;     // sys がこれだけ来なければ NO DATA
+const uint32_t BROKER_LOST_MS = 120000;  // MQTT がこれだけ切れたままなら全 PC を -- に
+const int CPU_T_WARN = 80, CPU_T_HOT = 90; // 温度の色分け (以上でアンバー / 赤)
+const int GPU_T_WARN = 80, GPU_T_HOT = 90;
+
+enum PcStatus : uint8_t
+{
+  PS_NONE, // まだ何も届いていない
+  PS_ONLINE,
+  PS_OFFLINE,
+  PS_SLEEP,
+  PS_LOST
+};
+
+enum ComfySt : uint8_t
+{
+  CS_NONE, // まだ何も届いていない
+  CS_OFF,
+  CS_IDLE,
+  CS_RUN,
+  CS_ERROR,
+  CS_DOWN,
+  CS_STALLED
+};
+
+struct PcInfo
+{
+  PcStatus status = PS_NONE;
+  char statusAt[6] = "--:--"; // status が変わった時刻 (HH:MM)
+
+  bool sysSeen = false;
+  uint32_t sysAt = 0; // sys を受けた時刻 (millis)
+  int16_t cpu = -1, cpuT = -1, ram = -1, gpu = -1, gpuT = -1;
+  float vram = -1, vramTot = -1;
+
+  ComfySt comfy = CS_NONE;
+  char comfyAt[6] = "--:--"; // comfy の st が変わった時刻
+  uint32_t comfyRecv = 0;    // comfy を受けた時刻 (millis。経過秒を進めて見せるため)
+  int16_t q = -1, step = -1, steps = -1;
+  int32_t el = -1;
+  char node[25] = "";
+  char err[41] = "";
+
+  // アラートの判定用。接続後の最初の値は基準値としてだけ使う (retain の古い lost や error で誤報しないため)
+  bool statusBase = false, comfyBase = false;
+  uint8_t alerted = 0; // 出したアラートの種類 (正常に戻るまで同じものは出さない)
+};
+PcInfo pcs[PC_N];
+uint32_t mqttLostAt = 0; // MQTT が切れた時刻 (起動直後は 0 = 起動時から切れている扱い)
+
+// ---- アラート ----
+const bool ALERT_RING_BELL = false;    // true でアラートのときに MQTT_DONE_TOPIC へ TIMER を送り、ベルも鳴らす
+const uint32_t ALERT_RING_MS = 30000;  // 警告音を鳴らす時間 (画面は解除されるまで残す)
+const int ALERT_QUEUE_N = 4;           // 上位の表示中に保留しておける数
+const int ALERT_HIST_N = 5;            // MONITOR 画面で見られる履歴の数
+enum : uint8_t
+{
+  AL_LOST = 1,
+  AL_ERROR = 2,
+  AL_DOWN = 4,
+  AL_STALLED = 8,
+  AL_COMFY = AL_ERROR | AL_DOWN | AL_STALLED
+};
+
+struct Alert
+{
+  char title[20];  // 大きく出す (例 "PC2 LOST")
+  char detail[48]; // 小さく出す (例 "KSampler OutOfMemoryError")
+  char at[6];      // 起きた時刻 HH:MM
+  bool quiet;      // 軽い音 1 回だけ (BROKER LOST)
+  uint32_t shownAt; // 最初に画面に出した時刻 (0 = まだ)。警告音はここから数える
+};
+Alert alertCur;
+bool alertActive = false;
+Alert alertQueue[ALERT_QUEUE_N];
+int alertQueueN = 0;
+Alert alertHist[ALERT_HIST_N]; // [0] が新しい
+int alertHistN = 0;
+bool monitorHistory = false; // MONITOR 画面で履歴を出している
+
+// ---- タイマー終了アラーム (CALL・アラートの表示中は待たせる) ----
+bool alarmPending = false; // 鳴らす順番待ち
+bool alarmOn = false;
+uint32_t alarmAt = 0;
+
 // ---- ブザー ----
 uint16_t buzzFreq = 0; // いま鳴らしている周波数 (0 = 止めている)
 uint8_t fbKind = 0;    // 通知 ON/OFF 切り替えの合図音 (0 = なし、1 = ON、2 = OFF)
@@ -391,16 +481,46 @@ void setBuzz(uint16_t freq)
     noTone(BUZZER_PIN);
 }
 
-// 鳴らす音を毎回決め直す。呼び出し音 > 切り替えの合図 > 終了アラーム の順に優先する
+// 鳴らす音を毎回決め直す。呼び出し音 > アラート > 切り替えの合図 > 終了アラーム の順に優先する
 void updateAlarm()
 {
   uint32_t now = millis();
   uint16_t f = 0;
-  if (callActive && now - callAt < CALL_RING_MS)
+
+  // 終了アラームは CALL・アラートの表示中は待たせ、閉じた後に最初から鳴らす
+  bool overlay = callActive || alertActive;
+  if (state != DONE)
+    alarmPending = alarmOn = false;
+  else if (overlay && alarmOn && now - alarmAt < 30000)
+  {
+    alarmOn = false;
+    alarmPending = true;
+  }
+  else if (!overlay && alarmPending)
+  {
+    alarmPending = false;
+    alarmOn = true;
+    alarmAt = now;
+  }
+
+  if (callActive)
   {
     // 呼び出し: 「ピン (高) ポーン (低)」を 2.5 秒ごとに繰り返す (終了アラームの 2700Hz ピピピッと聞き分けられるように)
     uint32_t ph = (now - callAt) % 2500;
-    f = ph < 350 ? 1760 : ph < 1100 ? 1397 : 0;
+    if (now - callAt < CALL_RING_MS)
+      f = ph < 350 ? 1760 : ph < 1100 ? 1397 : 0;
+  }
+  else if (alertActive && alertCur.shownAt)
+  {
+    uint32_t t = now - alertCur.shownAt;
+    if (alertCur.quiet)
+      f = t < 200 ? 880 : 0; // 軽い音 1 回
+    else if (t < ALERT_RING_MS)
+    {
+      // 警告: 低めの「ブー・ボー」を交互に (呼び出し音・終了アラームより低い)
+      uint32_t ph = t % 800;
+      f = ph < 350 ? 784 : (ph >= 400 && ph < 750) ? 587 : 0;
+    }
   }
   else if (fbKind)
   {
@@ -412,10 +532,10 @@ void updateAlarm()
     if (t >= 250)
       fbKind = 0;
   }
-  else if (state == DONE)
+  else if (alarmOn)
   {
     // 終了後 30 秒間「ピピピッ」を 1 秒ごとに繰り返す
-    uint32_t t = now - doneAt;
+    uint32_t t = now - alarmAt;
     uint32_t ph = t % 1000;
     if (t < 30000 && (ph < 80 || (ph >= 150 && ph < 230) || (ph >= 300 && ph < 380)))
       f = 2700;
@@ -429,6 +549,16 @@ bool getNow(struct tm *t)
   time_t now = time(nullptr);
   localtime_r(&now, t);
   return t->tm_year > (2020 - 1900); // NTP 同期前は 1970 年になっている
+}
+
+// いまの時刻を "HH:MM" で (時刻が合う前は "--:--")
+void nowHHMM(char *buf)
+{
+  struct tm t;
+  if (getNow(&t))
+    sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
+  else
+    strcpy(buf, "--:--");
 }
 
 const char *WDAY[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
@@ -1218,6 +1348,495 @@ void drawDashLayout()
   drawTicker(151, 2, factText[0] ? COL_TEXT : COL_DIM, msg, x + lead);
 }
 
+// ---- 画面: MONITOR / WIFI 共通の上部バー ----
+// MQTT が長く切れたままか (このときは PC の情報を信用せず -- にする)
+bool brokerLost()
+{
+  return mqtt.state() != MQTT_CONNECTED && millis() - mqttLostAt >= BROKER_LOST_MS;
+}
+
+// 時計が主役、タイマーは小さく。右端に MQ・ベル・WiFi
+void drawTopBar()
+{
+  char buf[16];
+  struct tm t;
+  if (getNow(&t))
+  {
+    sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
+    text(4, 1, 2, COL_CLOCK, buf);
+  }
+  else
+    text(4, 1, 2, COL_GHOST, "--:--");
+
+  const int x = 76;
+  RGB accent = currentAccent();
+  uint16_t c = stateColor(accent); // PAUSED・DONE は点滅
+  formatRemain(buf, remaining());
+  switch (state)
+  {
+  case READY:
+    sprintf(buf, "READY %um", PRESETS[presetIdx]);
+    text(x, 1, 2, COL_DIM, buf);
+    break;
+  case RUNNING:
+  case PAUSED:
+  {
+    if (state == RUNNING)
+      TRI(x, 2, x, 14, x + 9, 8, c);
+    else
+    {
+      FR(x, 2, 3, 13, c);
+      FR(x + 6, 2, 3, 13, c);
+    }
+    text(x + 14, 1, 2, c, buf);
+    char sub[8];
+    sprintf(sub, "(%um)", PRESETS[presetIdx]);
+    text(x + 14 + textW(buf, 2) + 6, 7, 1, COL_DIM, sub);
+    break;
+  }
+  case DONE:
+    text(x, 1, 2, c, "DONE");
+    break;
+  }
+
+  if (brokerLost())
+    text(206, 5, 1, blinkOn() ? c565(C_AMBER) : COL_DIM, "BROKER?");
+  drawNetStatus(266, 14);
+  drawWifiIcon(296, 14, c565(C_CYAN), COL_GHOST);
+  HL(0, 17, SCREEN_W, COL_LINE);
+}
+
+// ---- 画面: MONITOR (PC1〜PC3 の 3 段) ----
+const RGB C_GREEN = {60, 200, 90};
+const RGB C_BLUE = {70, 120, 255};
+
+// 経過秒を "m:ss" / "h:mm:ss" に
+void formatElapsed(char *buf, int32_t s)
+{
+  if (s >= 3600)
+    sprintf(buf, "%ld:%02ld:%02ld", (long)(s / 3600), (long)(s / 60 % 60), (long)(s % 60));
+  else
+    sprintf(buf, "%ld:%02ld", (long)(s / 60), (long)(s % 60));
+}
+
+// 長い文字列を先頭から maxChars 文字までにして写す
+void fitText(char *dst, size_t cap, const char *src, int maxChars)
+{
+  snprintf(dst, min(cap, (size_t)max(maxChars, 0) + 1), "%s", src);
+}
+
+uint16_t tempColor(int t, int warn, int hot)
+{
+  return t >= hot ? COL_RED : t >= warn ? c565(C_AMBER) : COL_TEXT;
+}
+
+// 実行中なら最後に受けてからの時間を足して、経過秒が進んで見えるようにする
+int32_t comfyElapsed(const PcInfo &p)
+{
+  if (p.el < 0)
+    return -1;
+  bool ticking = p.comfy == CS_RUN || p.comfy == CS_STALLED;
+  return p.el + (ticking ? (int32_t)((millis() - p.comfyRecv) / 1000) : 0);
+}
+
+// "CPU[バー] 55C" の 1 組。次の項目の左端を返す
+int drawHwItem(int x, int y, const char *label, int pct, int temp, int warn, int hot, bool fresh)
+{
+  text(x, y, 1, COL_DIM, label);
+  FR(x + 21, y, 30, 7, COL_GHOST);
+  if (fresh && pct > 0)
+    FR(x + 21, y, 30 * min(pct, 100) / 100, 7, c565(C_CYAN));
+  char buf[8];
+  if (fresh && temp >= 0)
+  {
+    sprintf(buf, "%dC", temp);
+    text(x + 55, y, 1, tempColor(temp, warn, hot), buf);
+  }
+  else
+    text(x + 55, y, 1, COL_GHOST, "--");
+  return x + 55 + 18 + 10;
+}
+
+// ComfyUI の状態。y は大きい文字 (サイズ 2) の上端、その 18 ドット下に小さい行
+void drawComfy(const PcInfo &p, int x, int y)
+{
+  const int right = SCREEN_W - 4;
+  char buf[48], el[12] = "";
+  int32_t e = comfyElapsed(p);
+  if (e >= 0)
+    formatElapsed(el, e);
+
+  switch (p.comfy)
+  {
+  case CS_RUN:
+  {
+    text(x, y, 2, c565(C_CYAN), "RUN");
+    int bx = x + 42;
+    bool hasStep = p.step >= 0 && p.steps > 0;
+    if (hasStep)
+    {
+      drawSegBar(bx, y + 3, 120, 8, 20, constrain((float)p.step / p.steps, 0.0f, 1.0f), C_CYAN);
+      sprintf(buf, "%d/%d", p.step, p.steps);
+      text(bx + 126, y + 3, 1, COL_TEXT, buf);
+    }
+    else if (el[0])
+      text(bx, y, 2, COL_TEXT, el); // 進捗が取れないときは経過時間だけ大きく
+
+    // 小さい行: ノード名 + 待ち数 + 経過。入りきらなければノード名 → 待ち数 → 経過の順に削る
+    bool showQ = p.q > 0, showEl = hasStep && el[0];
+    int nodeChars = 0;
+    char tail[24];
+    for (int pass = 0; pass < 3; pass++)
+    {
+      tail[0] = 0;
+      if (showQ)
+        sprintf(tail, "Q%d", p.q);
+      if (showEl)
+        sprintf(tail + strlen(tail), "%s%s", tail[0] ? "  " : "", el);
+      int tailW = tail[0] ? textW(tail, 1) + 12 : 0;
+      nodeChars = (right - bx - tailW) / 6;
+      if (nodeChars >= 6 || (int)strlen(p.node) <= nodeChars)
+        break;
+      if (pass == 0 && showQ)
+        showQ = false;
+      else
+        showEl = false;
+    }
+    fitText(buf, sizeof(buf), p.node, nodeChars);
+    text(bx, y + 18, 1, COL_DIM, buf);
+    if (tail[0])
+      textR(right, y + 18, 1, COL_TEXT, tail);
+    break;
+  }
+  case CS_IDLE:
+    text(x, y, 2, COL_TEXT, "IDLE");
+    if (p.q > 0)
+    {
+      sprintf(buf, "Q%d", p.q);
+      text(x + 60, y, 2, c565(C_AMBER), buf);
+    }
+    break;
+  case CS_OFF:
+    text(x, y, 2, COL_DIM, "COMFY OFF");
+    break;
+  case CS_ERROR:
+    text(x, y, 2, COL_RED, "ERROR");
+    fitText(buf, sizeof(buf), p.node, (right - x - 66) / 6);
+    text(x + 66, y + 4, 1, COL_TEXT, buf);
+    fitText(buf, sizeof(buf), p.err, (right - x) / 6);
+    text(x, y + 18, 1, COL_RED, buf);
+    break;
+  case CS_DOWN:
+    text(x, y, 2, COL_RED, "COMFY DOWN");
+    break;
+  case CS_STALLED:
+    text(x, y, 2, c565(C_AMBER), "STALLED");
+    if (el[0])
+      text(x + 92, y + 4, 1, c565(C_AMBER), el);
+    fitText(buf, sizeof(buf), p.node, (right - x) / 6);
+    text(x, y + 18, 1, COL_DIM, buf);
+    break;
+  default:
+    text(x, y, 2, COL_GHOST, "COMFY --");
+    break;
+  }
+}
+
+void drawPcRow(int i, int y0)
+{
+  static const PcInfo empty;
+  const PcInfo &p = brokerLost() ? empty : pcs[i]; // ブローカーが落ちていたら全部 --
+  const int x = 58;
+
+  text(4, y0 + 4, 2, COL_TEXT, PC_NAMES[i]);
+
+  // 状態ランプ
+  switch (p.status)
+  {
+  case PS_ONLINE:
+    CIRC(46, y0 + 11, 4, c565(C_GREEN));
+    break;
+  case PS_OFFLINE:
+    CIRC(46, y0 + 11, 4, COL_DIM);
+    break;
+  case PS_SLEEP:
+    CIRC(46, y0 + 11, 4, c565(C_BLUE));
+    break;
+  case PS_LOST:
+    CIRC(46, y0 + 11, 4, blinkOn() ? COL_RED : COL_GHOST);
+    break;
+  default:
+    text(41, y0 + 8, 1, COL_DIM, "--");
+    break;
+  }
+
+  // 落ちている・寝ている PC は状態と変化時刻だけ
+  if (p.status == PS_OFFLINE || p.status == PS_SLEEP || p.status == PS_LOST)
+  {
+    char buf[24];
+    const char *label = p.status == PS_OFFLINE ? "OFFLINE" : p.status == PS_SLEEP ? "SLEEP" : "LOST";
+    uint16_t c = p.status == PS_OFFLINE ? COL_DIM : p.status == PS_SLEEP ? c565(C_BLUE) : (blinkOn() ? COL_RED : c565(lerpRGB(C_RED, {5, 7, 11}, 0.5f)));
+    sprintf(buf, "%s %s", label, p.statusAt);
+    text(x, y0 + 18, 2, c, buf);
+    return;
+  }
+
+  // 1 行目: CPU・GPU・VRAM
+  bool fresh = p.sysSeen && millis() - p.sysAt < SYS_STALE_MS;
+  int hx = drawHwItem(x, y0 + 5, "CPU", p.cpu, p.cpuT, CPU_T_WARN, CPU_T_HOT, fresh);
+  hx = drawHwItem(hx, y0 + 5, "GPU", p.gpu, p.gpuT, GPU_T_WARN, GPU_T_HOT, fresh);
+  if (!fresh)
+    text(hx, y0 + 5, 1, COL_DIM, "NO DATA");
+  else
+  {
+    char buf[16];
+    text(hx, y0 + 5, 1, COL_DIM, "VRAM");
+    if (p.vram >= 0 && p.vramTot > 0)
+      sprintf(buf, "%.1f/%.0f", p.vram, p.vramTot);
+    else
+      strcpy(buf, "--");
+    text(hx + 27, y0 + 5, 1, COL_TEXT, buf);
+  }
+
+  // 2 行目: ComfyUI
+  drawComfy(p, x, y0 + 18);
+}
+
+// MONITOR 画面で SELECT 短押しすると出る、直近のアラート
+void drawAlertHistory()
+{
+  text(4, 22, 1, COL_DIM, "ALERT HISTORY");
+  if (alertHistN == 0)
+  {
+    textC(SCREEN_W / 2, 90, 2, COL_GHOST, "NO ALERTS");
+    return;
+  }
+  for (int i = 0; i < alertHistN; i++)
+  {
+    const Alert &a = alertHist[i];
+    int y = 34 + i * 27;
+    text(4, y + 3, 1, COL_DIM, a.at);
+    text(40, y, 2, a.quiet ? c565(C_AMBER) : COL_RED, a.title);
+    char buf[48];
+    fitText(buf, sizeof(buf), a.detail, (SCREEN_W - 40) / 6);
+    text(40, y + 16, 1, COL_TEXT, buf);
+  }
+}
+
+void drawMonitorLayout()
+{
+  drawTopBar();
+  if (monitorHistory)
+  {
+    drawAlertHistory();
+    return;
+  }
+  const int top = 20, rowH = (SCREEN_H - top) / PC_N;
+  for (int i = 0; i < PC_N; i++)
+  {
+    int y0 = top + i * rowH;
+    drawPcRow(i, y0);
+    if (i < PC_N - 1)
+      HL(4, y0 + rowH - 1, SCREEN_W - 8, COL_LINE);
+  }
+}
+
+// ---- WiFi の混み具合 (2.4GHz のみ。ESP32 は 5GHz を受けられない) ----
+const int WIFI_CH_N = 13;
+const int CH_SPREAD = 2;                  // 各 AP は自分の ch と ±2ch に影響するとみなす
+const int RSSI_STRONG = -50, RSSI_MID = -70; // 電波の強さの区切り (dBm)
+const float W_STRONG = 1.0f, W_MID = 0.5f, W_WEAK = 0.2f; // 混雑スコアの重み
+const uint32_t SCAN_EVERY_MS = 60000;     // WIFI 画面の表示中だけ、この間隔でスキャンする
+const int AP_TOP_N = 5;
+
+struct ApInfo
+{
+  char ssid[13]; // 先頭 12 文字 (ASCII 以外は ?)
+  uint8_t ch;
+  int8_t rssi;
+};
+
+float chScore[WIFI_CH_N + 1]; // [1]〜[13]
+uint8_t chCount[WIFI_CH_N + 1];
+ApInfo apTop[AP_TOP_N];
+int apTopN = 0;
+int apTotal = 0;
+bool scanHave = false; // 一度でも結果がある
+bool scanning = false;
+uint32_t scanStartedAt = 0, lastScanAt = 0;
+char scanAt[6] = "--:--";
+
+// SSID を表示用に詰める。UTF-8 の多バイト文字は 1 文字 = 1 個の ? にする
+void asciiSsid(char *dst, size_t maxChars, const char *src)
+{
+  size_t n = 0;
+  for (const uint8_t *p = (const uint8_t *)src; *p && n < maxChars; p++)
+  {
+    if (*p >= 0x80 && *p < 0xC0)
+      continue; // 多バイト文字の 2 バイト目以降
+    dst[n++] = (*p >= 0x20 && *p < 0x7F) ? *p : '?';
+  }
+  dst[n] = 0;
+  if (n == 0)
+    strcpy(dst, "(hidden)");
+}
+
+void takeScanResult(int n)
+{
+  memset(chScore, 0, sizeof(chScore));
+  memset(chCount, 0, sizeof(chCount));
+  apTopN = 0;
+  apTotal = 0;
+  for (int i = 0; i < n; i++)
+  {
+    int ch = WiFi.channel(i);
+    int rssi = WiFi.RSSI(i);
+    if (ch < 1 || ch > WIFI_CH_N)
+      continue;
+    apTotal++;
+    chCount[ch]++;
+    float w = rssi >= RSSI_STRONG ? W_STRONG : rssi >= RSSI_MID ? W_MID : W_WEAK;
+    for (int c = max(1, ch - CH_SPREAD); c <= min(WIFI_CH_N, ch + CH_SPREAD); c++)
+      chScore[c] += w;
+
+    // 強い順の上位 5 件 (挿入して並べる)
+    int pos = apTopN;
+    while (pos > 0 && apTop[pos - 1].rssi < rssi)
+      pos--;
+    if (pos >= AP_TOP_N)
+      continue;
+    for (int k = min(apTopN, AP_TOP_N - 1); k > pos; k--)
+      apTop[k] = apTop[k - 1];
+    asciiSsid(apTop[pos].ssid, 12, WiFi.SSID(i).c_str());
+    apTop[pos].ch = ch;
+    apTop[pos].rssi = rssi;
+    apTopN = min(apTopN + 1, AP_TOP_N);
+  }
+}
+
+// loop() から毎回呼ぶ。非同期スキャンなので画面は止まらない
+void updateWifiScan()
+{
+  if (scanning)
+  {
+    int n = WiFi.scanComplete();
+    if (n >= 0)
+    {
+      takeScanResult(n);
+      WiFi.scanDelete(); // 結果を写したらすぐメモリを返す
+      scanning = false;
+      scanHave = true;
+      lastScanAt = millis();
+      nowHHMM(scanAt);
+      Serial.printf("wifi: scan %d APs in %lums\n", n, (unsigned long)(millis() - scanStartedAt));
+    }
+    else if (n == WIFI_SCAN_FAILED || millis() - scanStartedAt > 15000)
+    {
+      WiFi.scanDelete();
+      scanning = false;
+      lastScanAt = millis() - SCAN_EVERY_MS + 10000; // 10 秒後にやり直す
+      Serial.println("wifi: scan failed");
+    }
+    return;
+  }
+  // スキャン中は通信が 1〜2 秒途切れるので、WIFI 画面を見ているときだけ
+  if (viewMode != VIEW_WIFI || WiFi.status() != WL_CONNECTED)
+    return;
+  if (lastScanAt && millis() - lastScanAt < SCAN_EVERY_MS)
+    return;
+  if (WiFi.scanNetworks(true /*async*/, true /*hidden*/, false, 120 /*ms/ch*/) == WIFI_SCAN_FAILED)
+  {
+    lastScanAt = millis() - SCAN_EVERY_MS + 10000;
+    Serial.println("wifi: scan start failed");
+    return;
+  }
+  scanning = true;
+  scanStartedAt = millis();
+}
+
+// ---- 画面: WIFI ----
+void drawWifiLayout()
+{
+  drawTopBar();
+  char buf[24];
+  bool conn = WiFi.status() == WL_CONNECTED;
+  int myCh = conn ? WiFi.channel() : 0;
+
+  // 左: ch ごとの混雑スコアの棒グラフ
+  const int gx = 4, pitch = 13, barW = 10, base = 151, maxH = 104;
+  text(gx, 22, 1, COL_DIM, "2.4GHz");
+  if (scanning)
+    strcpy(buf, "SCANNING");
+  else
+    sprintf(buf, "SCAN %s", scanAt);
+  textR(gx + pitch * WIFI_CH_N - 3, 22, 1, scanning ? c565(C_AMBER) : COL_DIM, buf);
+  if (scanHave)
+  {
+    float top = 2.0f; // スコアが小さくても棒が伸びすぎないよう、目盛りの上限は 2 以上
+    for (int c = 1; c <= WIFI_CH_N; c++)
+      top = max(top, chScore[c]);
+    for (int c = 1; c <= WIFI_CH_N; c++)
+    {
+      int x = gx + (c - 1) * pitch;
+      int h = lroundf(chScore[c] / top * maxH);
+      bool mine = c == myCh;
+      FR(x, base - maxH, barW, maxH, COL_GHOST);
+      if (h > 0)
+        FR(x, base - h, barW, h, mine ? c565(C_AMBER) : c565(C_CYAN));
+      if (chCount[c])
+      {
+        // 棒の上にその ch の AP の数
+        sprintf(buf, "%u", chCount[c]);
+        textC(x + barW / 2, base - h - 9, 1, COL_TEXT, buf);
+      }
+    }
+  }
+  else
+    text(gx + 20, 80, 1, COL_DIM, conn ? "SCANNING..." : "WIFI...");
+  for (int c = 1; c <= WIFI_CH_N; c++)
+  {
+    sprintf(buf, "%d", c);
+    textC(gx + (c - 1) * pitch + barW / 2, base + 4, 1, c == myCh ? c565(C_AMBER) : COL_DIM, buf);
+  }
+
+  // 右: 自分の接続・一番空いている ch・強い AP
+  const int px = 178, pr = SCREEN_W - 4;
+  if (conn)
+  {
+    sprintf(buf, "CH%d", myCh);
+    text(px, 22, 2, c565(C_AMBER), buf);
+    sprintf(buf, "%ddBm", WiFi.RSSI());
+    textR(pr, 22, 1, COL_TEXT, buf);
+  }
+  else
+    text(px, 22, 2, COL_GHOST, "CH--");
+  if (scanHave)
+  {
+    sprintf(buf, "%d APs", apTotal);
+    textR(pr, 31, 1, COL_DIM, buf);
+
+    // 重ならない 1 / 6 / 11 のうち、いちばん空いている ch
+    int best = 1;
+    for (int c : {6, 11})
+      if (chScore[c] < chScore[best])
+        best = c;
+    text(px, 43, 1, COL_DIM, "BEST");
+    sprintf(buf, "ch%d", best);
+    text(px + 30, 40, 2, c565(C_GREEN), buf);
+
+    HL(px, 59, pr - px, COL_LINE);
+    for (int i = 0; i < apTopN; i++)
+    {
+      int y = 64 + i * 11;
+      text(px, y, 1, COL_TEXT, apTop[i].ssid);
+      sprintf(buf, "%u", apTop[i].ch);
+      textR(px + 96, y, 1, apTop[i].ch == myCh ? c565(C_AMBER) : COL_DIM, buf);
+      sprintf(buf, "%d", apTop[i].rssi);
+      textR(pr, y, 1, apTop[i].rssi >= RSSI_STRONG ? COL_TEXT : COL_DIM, buf);
+    }
+  }
+}
+
 // ---- 画面: 呼び出し (どのレイアウトの上にも重ねる) ----
 void drawCallOverlay()
 {
@@ -1229,6 +1848,25 @@ void drawCallOverlay()
   textC(SCREEN_W / 2, y + 66, 2, COL_TEXT, callTime);
 }
 
+// ---- 画面: アラート (CALL と同じ重ね表示。赤背景) ----
+void drawAlertOverlay()
+{
+  const int x = 8, y = 34, w = 304, h = 102, b = 3;
+  bool on = blinkOn();
+  RR(x, y, w, h, 8, on ? COL_RED : c565(140, 20, 30));
+  RR(x + b, y + b, w - 2 * b, h - 2 * b, 6, c565(70, 8, 14));
+  textC(SCREEN_W / 2, y + 14, 3, COL_TEXT, alertCur.title);
+  textC(SCREEN_W / 2, y + 50, 1, COL_TEXT, alertCur.detail);
+  textC(SCREEN_W / 2, y + 70, 2, c565(255, 200, 200), alertCur.at);
+  if (alertQueueN > 0)
+  {
+    // 後ろに待っている数
+    char buf[8];
+    sprintf(buf, "+%d", alertQueueN);
+    textR(x + w - 8, y + 8, 1, c565(255, 200, 200), buf);
+  }
+}
+
 // ---- 画面全体 ----
 void drawScene()
 {
@@ -1236,6 +1874,10 @@ void drawScene()
     drawDigitalLayout();
   else if (viewMode == VIEW_DASH)
     drawDashLayout();
+  else if (viewMode == VIEW_MONITOR)
+    drawMonitorLayout();
+  else if (viewMode == VIEW_WIFI)
+    drawWifiLayout();
   else
     drawAnalogLayout();
 
@@ -1249,8 +1891,11 @@ void drawScene()
     FR(SCREEN_W - b, 0, b, SCREEN_H, COL_RED);
   }
 
+  // 重ね表示は CALL > アラート (下位のものは上位が閉じるまで待つ)
   if (callActive)
     drawCallOverlay();
+  else if (alertActive)
+    drawAlertOverlay();
 }
 
 void renderFrame()
@@ -1277,6 +1922,21 @@ void closeCall()
   callActive = false;
   setBuzz(0);
   Serial.println("call: closed");
+}
+
+// いまのアラートを閉じ、保留があれば次を出す
+void closeAlert()
+{
+  Serial.printf("alert: closed %s\n", alertCur.title);
+  setBuzz(0);
+  if (alertQueueN > 0)
+  {
+    alertCur = alertQueue[0];
+    memmove(alertQueue, alertQueue + 1, (alertQueueN - 1) * sizeof(Alert));
+    alertQueueN--;
+  }
+  else
+    alertActive = false;
 }
 
 void toggleNotify()
@@ -1314,15 +1974,24 @@ void handleButtons()
     }
   }
 
-  // 呼び出し画面はどちらかのボタンで閉じる。この押下は普段の操作に使わない
-  if (callActive && (s != EV_NONE || g != EV_NONE))
+  // 呼び出し・アラートの画面はどちらかのボタンで閉じる (上に出ているものから 1 つずつ)。この押下は普段の操作に使わない
+  if ((callActive || alertActive) && (s != EV_NONE || g != EV_NONE))
   {
-    closeCall();
+    if (callActive)
+      closeCall();
+    else
+      closeAlert();
     beep(2000, 40);
     return;
   }
 
-  if (s == EV_SHORT && state != RUNNING)
+  if (s == EV_SHORT && viewMode == VIEW_MONITOR)
+  {
+    // MONITOR 画面では SELECT 短押しでアラート履歴を出す・戻す (プリセット変更はほかの画面で)
+    monitorHistory = !monitorHistory;
+    beep(3200, 25);
+  }
+  else if (s == EV_SHORT && state != RUNNING)
   {
     presetIdx = (presetIdx + 1) % PRESET_N;
     resetTimer();
@@ -1332,6 +2001,7 @@ void handleButtons()
   else if (s == EV_LONG)
   {
     viewMode = (viewMode + 1) % VIEW_N;
+    monitorHistory = false;
     savePrefs();
     beep(2400, 40);
   }
@@ -1372,9 +2042,208 @@ bool payloadIs(const byte *p, unsigned int len, const char *s)
   return len == n && strncmp((const char *)p, s, n) == 0;
 }
 
-// mqtt.loop() の中から呼ばれる。ここでは合図のフラグを立てるだけにし、描画や音は loop() 側で行う
+// 購読するトピック。再接続のたびに全部購読し直す
+const char *MQTT_SUBS[] = {MQTT_SUB_TOPIC, "info/pc/+/status", "info/pc/+/sys", "info/pc/+/comfy"};
+
+int pcIndex(const char *name, size_t n)
+{
+  for (int i = 0; i < PC_N; i++)
+    if (strlen(PC_NAMES[i]) == n && strncmp(PC_NAMES[i], name, n) == 0)
+      return i;
+  return -1;
+}
+
+ComfySt parseComfySt(const char *s)
+{
+  if (!strcmp(s, "off"))
+    return CS_OFF;
+  if (!strcmp(s, "idle"))
+    return CS_IDLE;
+  if (!strcmp(s, "run"))
+    return CS_RUN;
+  if (!strcmp(s, "error"))
+    return CS_ERROR;
+  if (!strcmp(s, "down"))
+    return CS_DOWN;
+  if (!strcmp(s, "stalled"))
+    return CS_STALLED;
+  return CS_NONE;
+}
+
+const char *pcStatusName(PcStatus s)
+{
+  static const char *N[] = {"none", "online", "offline", "sleep", "lost"};
+  return N[s];
+}
+
+// アラートを積む (画面と音は loop() 側の updateAlarm()・drawScene() が出す)
+void raiseAlert(const char *title, const char *detail, bool quiet)
+{
+  Alert a = {};
+  strlcpy(a.title, title, sizeof(a.title));
+  strlcpy(a.detail, detail, sizeof(a.detail));
+  nowHHMM(a.at);
+  a.quiet = quiet;
+  Serial.printf("alert: %s / %s\n", a.title, a.detail);
+
+  // 履歴 (新しいものが先頭)
+  memmove(alertHist + 1, alertHist, (ALERT_HIST_N - 1) * sizeof(Alert));
+  alertHist[0] = a;
+  alertHistN = min(alertHistN + 1, ALERT_HIST_N);
+
+  if (!alertActive)
+  {
+    alertCur = a;
+    alertActive = true;
+  }
+  else
+  {
+    // 表示中なら後ろに並べる。いっぱいなら一番古い保留を捨てる
+    if (alertQueueN == ALERT_QUEUE_N)
+    {
+      Serial.printf("alert: queue full, dropped %s\n", alertQueue[0].title);
+      memmove(alertQueue, alertQueue + 1, (ALERT_QUEUE_N - 1) * sizeof(Alert));
+      alertQueueN--;
+    }
+    alertQueue[alertQueueN++] = a;
+  }
+
+  if (ALERT_RING_BELL && !quiet && mqtt.connected())
+    mqtt.publish(MQTT_DONE_TOPIC, MQTT_DONE_PAYLOAD, false);
+}
+
+// info/pc/<PC>/<種類> を PC ごとの構造体に写す
+void handlePcMessage(const char *topic, const byte *payload, unsigned int len)
+{
+  const char *name = topic + 8; // "info/pc/" の後ろ
+  const char *slash = strchr(name, '/');
+  if (!slash)
+    return;
+  int i = pcIndex(name, slash - name);
+  if (i < 0)
+  {
+    Serial.printf("mqtt: unknown pc %s\n", topic);
+    return;
+  }
+  PcInfo &pc = pcs[i];
+  const char *kind = slash + 1;
+
+  if (!strcmp(kind, "status"))
+  {
+    // 空 (retain の削除) はデータなしに戻す
+    PcStatus s = payloadIs(payload, len, "online")    ? PS_ONLINE
+                 : payloadIs(payload, len, "offline") ? PS_OFFLINE
+                 : payloadIs(payload, len, "sleep")   ? PS_SLEEP
+                 : payloadIs(payload, len, "lost")    ? PS_LOST
+                                                      : PS_NONE;
+    if (s != pc.status)
+    {
+      // 予期せぬダウン (online → lost) だけアラートにする。offline・sleep はしない
+      if (pc.statusBase && pc.status == PS_ONLINE && s == PS_LOST && !(pc.alerted & AL_LOST))
+      {
+        char title[20];
+        sprintf(title, "%s LOST", PC_NAMES[i]);
+        raiseAlert(title, "UNEXPECTED DISCONNECT", false);
+        pc.alerted |= AL_LOST;
+      }
+      pc.status = s;
+      nowHHMM(pc.statusAt);
+      Serial.printf("pc: %s status %s%s\n", PC_NAMES[i], pcStatusName(s), pc.statusBase ? "" : " (base)");
+    }
+    if (s == PS_ONLINE)
+      pc.alerted &= ~AL_LOST; // 正常に戻ったので、次の lost はまた知らせる
+    pc.statusBase = true;
+    return;
+  }
+
+  if (!strcmp(kind, "sys"))
+  {
+    JsonDocument doc;
+    DeserializationError e = deserializeJson(doc, (const char *)payload, len);
+    if (e)
+    {
+      Serial.printf("pc: %s sys bad json (%s)\n", PC_NAMES[i], e.c_str());
+      return;
+    }
+    pc.cpu = doc["cpu"] | -1;
+    pc.cpuT = doc["cpu_t"] | -1;
+    pc.ram = doc["ram"] | -1;
+    pc.gpu = doc["gpu"] | -1;
+    pc.gpuT = doc["gpu_t"] | -1;
+    pc.vram = doc["vram"] | -1.0f;
+    pc.vramTot = doc["vram_tot"] | -1.0f;
+    pc.sysSeen = true;
+    pc.sysAt = millis();
+    return;
+  }
+
+  if (!strcmp(kind, "comfy"))
+  {
+    ComfySt st = CS_NONE; // 空 (retain の削除) はデータなし
+    if (len > 0)
+    {
+      JsonDocument doc;
+      DeserializationError e = deserializeJson(doc, (const char *)payload, len);
+      if (e)
+      {
+        Serial.printf("pc: %s comfy bad json (%s)\n", PC_NAMES[i], e.c_str());
+        return;
+      }
+      st = parseComfySt(doc["st"] | "");
+      pc.q = doc["q"] | -1;
+      pc.step = doc["step"] | -1;
+      pc.steps = doc["steps"] | -1;
+      pc.el = doc["el"] | -1;
+      strlcpy(pc.node, doc["node"] | "", sizeof(pc.node));
+      strlcpy(pc.err, doc["err"] | "", sizeof(pc.err));
+    }
+    pc.comfyRecv = millis();
+    if (st != pc.comfy)
+    {
+      // error・down・stalled に変わったらアラート (接続後の最初の値は基準値なので出さない)
+      uint8_t kind = st == CS_ERROR ? AL_ERROR : st == CS_DOWN ? AL_DOWN : st == CS_STALLED ? AL_STALLED : 0;
+      if (pc.comfyBase && kind && !(pc.alerted & kind))
+      {
+        char title[20], detail[48];
+        if (kind == AL_ERROR)
+        {
+          sprintf(title, "%s COMFY ERROR", PC_NAMES[i]);
+          snprintf(detail, sizeof(detail), "%s %s", pc.node, pc.err);
+        }
+        else if (kind == AL_DOWN)
+        {
+          sprintf(title, "%s COMFY DOWN", PC_NAMES[i]);
+          strcpy(detail, "COMFYUI NOT RESPONDING");
+        }
+        else
+        {
+          sprintf(title, "%s STALLED", PC_NAMES[i]);
+          char span[12] = "";
+          if (pc.el >= 0)
+            formatSpan(span, pc.el / 60);
+          snprintf(detail, sizeof(detail), "%s %s", pc.node, span);
+        }
+        raiseAlert(title, detail, false);
+        pc.alerted |= kind;
+      }
+      pc.comfy = st;
+      nowHHMM(pc.comfyAt);
+      Serial.printf("pc: %s comfy st=%d node=%s err=%s%s\n", PC_NAMES[i], st, pc.node, pc.err, pc.comfyBase ? "" : " (base)");
+    }
+    if (st == CS_IDLE || st == CS_RUN)
+      pc.alerted &= ~AL_COMFY; // 正常に戻ったので、次のエラーなどはまた知らせる
+    pc.comfyBase = true;
+  }
+}
+
+// mqtt.loop() の中から呼ばれる。ここでは値やフラグを書き込むだけにし、描画や音は loop() 側で行う
 void mqttCallback(char *topic, byte *payload, unsigned int len)
 {
+  if (!strncmp(topic, "info/pc/", 8))
+  {
+    handlePcMessage(topic, payload, len);
+    return;
+  }
   Serial.printf("mqtt: recv %s \"%.*s\"\n", topic, (int)min(len, 64u), (const char *)payload);
   if (strcmp(topic, MQTT_SUB_TOPIC) != 0)
     return;
@@ -1397,11 +2266,21 @@ void mqttUpdate()
     Serial.println("mqtt: done notify dropped (not connected within 60s)");
   }
 
+  // 2 分以上つながらなければ、軽い音 1 回のアラートを 1 度だけ
+  static bool brokerAlerted = false;
+  if (!brokerAlerted && brokerLost())
+  {
+    brokerAlerted = true;
+    raiseAlert("BROKER LOST", "MQTT " MQTT_HOST " NOT REACHABLE", true);
+  }
+
   if (WiFi.status() != WL_CONNECTED)
   {
     if (wasConnected)
     {
       wasConnected = false;
+      mqttLostAt = millis();
+      mqtt.disconnect(); // 状態を「切断」にしておく (MQ 表示と BROKER? の判定に使う)
       Serial.println("mqtt: disconnected (wifi lost)");
     }
     return;
@@ -1412,6 +2291,7 @@ void mqttUpdate()
     if (wasConnected)
     {
       wasConnected = false;
+      mqttLostAt = millis();
       retryMs = 0;
       Serial.printf("mqtt: disconnected (state %d)\n", mqtt.state());
     }
@@ -1427,10 +2307,17 @@ void mqttUpdate()
     }
     wasConnected = true;
     retryMs = 5000;
+    brokerAlerted = false;
+    // retain で届く古い値を誤報にしないよう、接続のたびに基準値を取り直す
+    for (PcInfo &pc : pcs)
+      pc.statusBase = pc.comfyBase = false;
     Serial.println("mqtt: connected");
     // 再接続のたびに購読し直す
-    bool ok = mqtt.subscribe(MQTT_SUB_TOPIC);
-    Serial.printf("mqtt: subscribe %s %s\n", MQTT_SUB_TOPIC, ok ? "ok" : "FAILED");
+    for (const char *topic : MQTT_SUBS)
+    {
+      bool ok = mqtt.subscribe(topic);
+      Serial.printf("mqtt: subscribe %s %s\n", topic, ok ? "ok" : "FAILED");
+    }
   }
 
   mqtt.loop();
@@ -1451,11 +2338,7 @@ void updateCall()
     callReq = false;
     callActive = true; // 表示中に再び来たら、表示時間と音を最初から
     callAt = millis();
-    struct tm t;
-    if (getNow(&t))
-      sprintf(callTime, "%02d:%02d", t.tm_hour, t.tm_min);
-    else
-      strcpy(callTime, "--:--");
+    nowHHMM(callTime);
     if (state == RUNNING)
     {
       remainMs = remaining();
@@ -1465,6 +2348,10 @@ void updateCall()
   }
   if (callActive && millis() - callAt >= CALL_SHOW_MS)
     closeCall();
+
+  // アラートは CALL が出ていないときに表に出る。警告音はそのときから数える
+  if (alertActive && !callActive && !alertCur.shownAt)
+    alertCur.shownAt = millis() | 1; // 0 は「まだ」の意味なので避ける
 }
 
 void setup()
@@ -1503,6 +2390,8 @@ void setup()
   mqtt.setSocketTimeout(2); // CONNACK などを待つ上限 (秒)
   mqttNet.setTimeout(1);    // TCP 接続を待つ上限 (秒)
 
+  Serial.printf("heap: free %u\n", ESP.getFreeHeap());
+
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   configTzTime("JST-9", "ntp.nict.jp", "time.google.com", "pool.ntp.org");
@@ -1517,7 +2406,7 @@ void loop()
   if (state == RUNNING && remaining() == 0)
   {
     state = DONE;
-    doneAt = millis();
+    alarmPending = true; // 鳴らし始めは updateAlarm() が決める (CALL・アラートの表示中は待つ)
     recordPomodoro();
     // 終了を呼び出しベルの受信機に知らせる (切断中なら再接続後に送る)
     if (notifyEnabled)
@@ -1528,6 +2417,15 @@ void loop()
   }
   updateAlarm();
   updateFact();
+  updateWifiScan();
+
+  // メモリ不足による再起動がないか、1 時間ごとに残りを出す
+  static uint32_t lastHeapLog = 0;
+  if (millis() - lastHeapLog >= 3600000)
+  {
+    lastHeapLog = millis();
+    Serial.printf("heap: free %u\n", ESP.getFreeHeap());
+  }
 
   static uint32_t lastDraw = 0;
   if (millis() - lastDraw >= 50)

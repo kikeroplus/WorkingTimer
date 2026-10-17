@@ -74,7 +74,9 @@ retain=true、QoS 1。状態が変わったとき＋実行中は 2 秒ごと＋�
 ## 4. 呼び出しベル（既存）
 
 - `doorbell/call/device2`〜`device5`、ペイロード `ON` / `OFF` / `TIMER`、retain=false。
-- `device4` の枠は WorkingTimer が購読する（MQTT_TASK.md 参照）。
+- WorkingTimer は `doorbell/call/device3` を購読し（受信機 device3 と同時に反応）、タイマー終了時に同じトピックへ `TIMER` を送る。
+  WorkingTimer のクライアント ID は `workingtimer`（受信機の `doorbell_device3` と別）。
+- `device4`・`device5` は空き枠。
 
 ## 5. アラートの責任分担
 
