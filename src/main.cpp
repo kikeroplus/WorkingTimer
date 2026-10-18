@@ -102,6 +102,15 @@ RGB phaseRGB(float frac)
   return lerpRGB(C_RED, C_AMBER, frac / 0.2f);
 }
 
+// 終了時刻リングのページ用 (ほかのカウントダウンと見分けるため): 終了前 5 分は赤、その前の 10 分は黄、それより前は緑
+const RGB C_GO = {40, 220, 90};
+const RGB C_YELLOW = {255, 220, 0};
+const float END_RED_MIN = 5, END_YELLOW_MIN = 15;
+RGB endZoneRGB(float remMin)
+{
+  return remMin <= END_RED_MIN ? C_RED : remMin <= END_YELLOW_MIN ? C_YELLOW : C_GO;
+}
+
 // ---- 描画の下請け (帯のずれ gOff を差し引いて描く) ----
 inline void FR(int x, int y, int w, int h, uint16_t c) { cv->fillRect(x, y - gOff, w, h, c); }
 inline void RR(int x, int y, int w, int h, int r, uint16_t c) { cv->fillRoundRect(x, y - gOff, w, h, r, c); }
@@ -264,6 +273,7 @@ enum ViewMode
   VIEW_ANALOG_TIMER, // アナログ時計 + 右に残り時間の数字
   VIEW_ANALOG_ALL,   // アナログ時計 + 右に残り時間と現在時刻の両方
   VIEW_DASH,         // アナログ時計 + 残り時間・日の入り・ポモドーロ記録・砂時計・今日の豆知識
+  VIEW_DASH_END,     // VIEW_DASH の外周リングを「今 → 終了時刻」(1 周 60 分、60 分を超える分は内側) にしたもの。配色も別
   VIEW_MONITOR,      // PC1〜PC3 の負荷・温度と ComfyUI の状態
   VIEW_WIFI,         // 2.4GHz の混み具合 (ch ごとの棒グラフと強い AP)
   VIEW_N
@@ -609,6 +619,8 @@ RGB currentAccent()
 {
   if (state == DONE)
     return C_RED;
+  if (viewMode == VIEW_DASH_END)
+    return endZoneRGB(remaining() / 60000.0f);
   return phaseRGB(totalMs ? (float)remaining() / totalMs : 1.0f);
 }
 
@@ -752,23 +764,103 @@ void drawHand(float cx, float cy, float deg, float len, float tail, float width,
   QUAD(tx, ty, rx, ry, bx, by, lx, ly, c);
 }
 
-// 左側: アナログ時計の文字盤 (外周リングがタイマーの残り)
-void drawAnalogFace(float cx, float cy, float R, RGB accent, float frac, const struct tm &t, bool ok)
+// リングの 1 区画 (角度 a0〜a1 度、半径 r0〜r1) を塗る
+void ringSeg(float cx, float cy, float r0, float r1, float a0, float a1, uint16_t c)
 {
-  const float k = R / 68; // 目盛りや針の長さは半径 68 のときの値を基準に縮める
+  float x0, y0, x1, y1, x2, y2, x3, y3;
+  polar(cx, cy, r1, a0, x0, y0);
+  polar(cx, cy, r1, a1, x1, y1);
+  polar(cx, cy, r0, a1, x2, y2);
+  polar(cx, cy, r0, a0, x3, y3);
+  QUAD(x0, y0, x1, y1, x2, y2, x3, y3, c);
+}
 
-  // 外周: タイマーの残りを 60 区画のリングで表示
-  int litN = (int)ceilf(frac * 60);
-  uint16_t ringOn = timerDigitColor(accent);
+// 60 区画のリングのうち、角度 s〜e (0 <= s < 360、s <= e <= s + 360) の所だけ on で塗る (消えている区画は先に塗っておく)。
+// 区画の途中で切れる所は、その区画の一部だけ塗る (弧の端がなめらかに動く)
+void litArc(float cx, float cy, float r0, float r1, float s, float e, uint16_t on)
+{
   for (int i = 0; i < 60; i++)
   {
     float a0 = i * 6 + 1.0f, a1 = i * 6 + 5.0f;
-    float x0, y0, x1, y1, x2, y2, x3, y3;
-    polar(cx, cy, R, a0, x0, y0);
-    polar(cx, cy, R, a1, x1, y1);
-    polar(cx, cy, R - 5, a1, x2, y2);
-    polar(cx, cy, R - 5, a0, x3, y3);
-    QUAD(x0, y0, x1, y1, x2, y2, x3, y3, (state != DONE && i < litN) ? ringOn : COL_GHOST);
+    for (int lap = 0; lap <= 1; lap++) // 範囲が 0° (12 時) をまたぐときは 2 周目の角度で重なる
+    {
+      float lo = max(a0 + lap * 360, s), hi = min(a1 + lap * 360, e);
+      if (hi > lo)
+        ringSeg(cx, cy, r0, r1, lo, hi, on);
+    }
+  }
+}
+
+// 終了時刻リング: 長針と同じく 1 周 60 分で、今の分の位置から終了時刻の分の位置までを光らせる。
+// 60 分後までは外側、それより先は内側 (少し暗く)。どちらの弧も終了時刻の所で終わり、そこに印を付ける。
+// 色は終了の何分前かで決まる (終了前 5 分は赤、その前 10 分は黄、それより前は緑) ので、境目は文字盤の上で止まっている。
+// 待機中は「今始めたら」の予告を暗く出す。一時停止中は終了時刻が後ろへずれていくので、弧は長針と一緒に回る
+void drawEndRing(float cx, float cy, float R, const struct tm &t, bool ok)
+{
+  bool show = ok && state != DONE;
+  float remMin = remaining() / 60000.0f; // READY のときは設定した時間
+  float s = (t.tm_min + t.tm_sec / 60.0f) * 6;
+  // 今から u 分後の位置を、外側は u = 0〜60、内側は u = 60〜120 として塗る
+  const struct
+  {
+    float r0, r1, u0;
+  } rings[2] = {{R - 5, R, 0}, {R - 10, R - 7, 60}};
+  const struct
+  {
+    float a, b; // 今から a〜b 分後
+    RGB c;
+  } zones[3] = {{0, remMin - END_YELLOW_MIN, C_GO},
+                {remMin - END_YELLOW_MIN, remMin - END_RED_MIN, C_YELLOW},
+                {remMin - END_RED_MIN, remMin, C_RED}};
+  for (int r = 0; r < 2; r++)
+  {
+    const auto &g = rings[r];
+    for (int i = 0; i < 60; i++)
+      ringSeg(cx, cy, g.r0, g.r1, i * 6 + 1.0f, i * 6 + 5.0f, COL_GHOST);
+    if (!show)
+      continue;
+    for (const auto &z : zones)
+    {
+      float lo = max(z.a, g.u0), hi = min(z.b, min(remMin, g.u0 + 60));
+      if (hi <= lo)
+        continue;
+      RGB c = state == PAUSED  ? lerpRGB(z.c, {120, 120, 120}, 0.5f)
+              : state == READY ? lerpRGB(z.c, C_GHOST_RGB, 0.55f)
+                               : z.c;
+      if (r == 1)
+        c = lerpRGB(c, {0, 0, 0}, 0.4f);
+      litArc(cx, cy, g.r0, g.r1, s + (lo - g.u0) * 6, s + (hi - g.u0) * 6, c565(c));
+    }
+  }
+
+  // 終点の印: リングを横切る白い線 (一時停止中は点滅)
+  if (show && (state != PAUSED || blinkOn()))
+  {
+    float e = s + remMin * 6;
+    float x0, y0, x1, y1, dx, dy;
+    polar(cx, cy, R + 1, e, x0, y0);
+    polar(cx, cy, remMin > 60 ? R - 11 : R - 6, e, x1, y1);
+    polar(0, 0, 1.0f, e + 90, dx, dy);
+    QUAD(x0 - dx, y0 - dy, x0 + dx, y0 + dy, x1 + dx, y1 + dy, x1 - dx, y1 - dy, state == READY ? COL_DIM : COL_TEXT);
+  }
+}
+
+// 左側: アナログ時計の文字盤 (外周リングがタイマーの残り)。
+// endRing のときは外周を終了時刻リングにし、内側のリングのぶん目盛りと針を小さくする
+void drawAnalogFace(float cx, float cy, float R, RGB accent, float frac, const struct tm &t, bool ok, bool endRing = false)
+{
+  const float Rf = endRing ? R - 5 : R; // 目盛りを置く文字盤の半径
+  const float k = Rf / 68;              // 目盛りや針の長さは半径 68 のときの値を基準に縮める
+
+  if (endRing)
+    drawEndRing(cx, cy, R, t, ok);
+  else
+  {
+    // 外周: タイマーの残りを 60 区画のリングで表示
+    int litN = (int)ceilf(frac * 60);
+    uint16_t ringOn = timerDigitColor(accent);
+    for (int i = 0; i < 60; i++)
+      ringSeg(cx, cy, R - 5, R, i * 6 + 1.0f, i * 6 + 5.0f, (state != DONE && i < litN) ? ringOn : COL_GHOST);
   }
 
   // 目盛り
@@ -779,8 +871,8 @@ void drawAnalogFace(float cx, float cy, float R, RGB accent, float frac, const s
     {
       float a = i * 6;
       float lx, ly, rx, ry;
-      polar(cx, cy, R - 10 * k, a, x0, y0);
-      polar(cx, cy, R - 18 * k, a, x1, y1);
+      polar(cx, cy, Rf - 10 * k, a, x0, y0);
+      polar(cx, cy, Rf - 18 * k, a, x1, y1);
       polar(0, 0, 1.2f, a + 90, rx, ry);
       lx = -rx;
       ly = -ry;
@@ -788,7 +880,7 @@ void drawAnalogFace(float cx, float cy, float R, RGB accent, float frac, const s
     }
     else
     {
-      polar(cx, cy, R - 11 * k, i * 6, x0, y0);
+      polar(cx, cy, Rf - 11 * k, i * 6, x0, y0);
       FR(lroundf(x0), lroundf(y0), 1, 1, COL_DIM);
     }
   }
@@ -1285,14 +1377,31 @@ void drawDashLayout()
 
   struct tm t;
   bool ok = getNow(&t);
-  drawAnalogFace(62, 84, 58, accent, frac, t, ok);
+  bool endView = viewMode == VIEW_DASH_END;
+  drawAnalogFace(62, 84, 58, accent, frac, t, ok, endView);
 
   // 中央上: 状態と残り時間
   const int px = 128, pr = 278;
   drawStateLabel(px, 26, accent);
-  sprintf(buf, "%u MIN", PRESETS[presetIdx]);
-  textR(pr, 30, 1, COL_DIM, buf);
-  drawNetStatus(207, 37); // このレイアウトには WiFi アイコンがないので、状態ラベルと「MIN」の間に置く
+  if (endView)
+  {
+    // 「25 MIN」の代わりに終了時刻 (待機中は今始めたときの時刻)
+    strcpy(buf, "--:--");
+    if (ok && state != DONE)
+    {
+      uint32_t e = (t.tm_hour * 3600UL + t.tm_min * 60 + t.tm_sec + (remaining() + 999) / 1000) % 86400;
+      sprintf(buf, "%02lu:%02lu", (unsigned long)(e / 3600), (unsigned long)(e / 60 % 60));
+    }
+    textR(pr, 30, 1, COL_TEXT, buf);
+    textR(pr - textW(buf, 1) - 4, 30, 1, COL_DIM, "END");
+    drawNetStatus(203, 37); // 「END」のぶん幅を取るので少し左へ
+  }
+  else
+  {
+    sprintf(buf, "%u MIN", PRESETS[presetIdx]);
+    textR(pr, 30, 1, COL_DIM, buf);
+    drawNetStatus(207, 37); // このレイアウトには WiFi アイコンがないので、状態ラベルと「MIN」の間に置く
+  }
   formatRemain(buf, rem);
   SegStyle med = {18, 36, 5, 5};
   drawSegText(px, 46, buf, med, timerDigitColor(accent), COL_GHOST);
@@ -1874,7 +1983,7 @@ void drawScene()
 {
   if (viewMode == VIEW_DIGITAL)
     drawDigitalLayout();
-  else if (viewMode == VIEW_DASH)
+  else if (viewMode == VIEW_DASH || viewMode == VIEW_DASH_END)
     drawDashLayout();
   else if (viewMode == VIEW_MONITOR)
     drawMonitorLayout();
