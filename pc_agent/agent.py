@@ -23,6 +23,7 @@ import tomllib
 import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import paho.mqtt.client as mqtt
 import psutil
@@ -178,7 +179,8 @@ class ComfyMonitor:
 
     STATS_EVERY = 5  # /system_stats を見る間隔 (秒)
     DOWN_FAILS = 3   # これだけ続けて失敗したら down
-    # comfy_url = "auto" のときに試すポート。デスクトップ版は 8000 から (使われていると 8001… へずれる)、普通の ComfyUI は 8188
+    # comfy_url = "auto" のときに試すポート。デスクトップ版は 8000 から (使われていると 8001… へずれる)、普通の ComfyUI は 8188。
+    # アドレスは待ち受けているものを使う (ComfyUI を LAN 向けに待ち受けさせていると 127.0.0.1 では届かない)
     AUTO_PORTS = list(range(8000, 8010)) + [8188]
 
     def __init__(self, url, stall_minutes, max_job_minutes):
@@ -191,6 +193,9 @@ class ComfyMonitor:
 
         self.ever_ok = False  # 起動以来一度でも応答したか (なければ off)
         self.fails = 0
+        self.crashed = False  # 応答しなくなったのが落ちたせいか (False なら普通の終了とみなして off)
+        self.server = None    # 応答していたときに待ち受けていたプロセス (psutil.Process)
+        self.app = None       # デスクトップ版のアプリ本体 (server の親で、名前に comfy を含むもの)
         self.last_stats = 0.0
         self.q = -1
 
@@ -214,18 +219,72 @@ class ComfyMonitor:
         if "system" not in r.json():
             raise ValueError("ComfyUI の応答ではない")
 
+    def _candidates(self):
+        """auto で試す URL。この PC で候補ポートを待ち受けているアドレスを OS に聞いて作る。
+        閉じたポートを直接試すと Windows では断られるまで 1 秒ほどかかるので、待ち受けていないものは試さない。"""
+        try:
+            found = {}
+            for c in psutil.net_connections("tcp"):
+                if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port in self.AUTO_PORTS:
+                    ip = c.laddr.ip
+                    host = {"0.0.0.0": "127.0.0.1", "::": "[::1]"}.get(ip, f"[{ip}]" if ":" in ip else ip)
+                    found.setdefault(f"http://{host}:{c.laddr.port}", c.laddr.port)
+            return sorted(found, key=lambda u: self.AUTO_PORTS.index(found[u]))
+        except Exception as e:
+            log.info("net_connections: %s", e)
+            return [f"http://127.0.0.1:{port}" for port in self.AUTO_PORTS]
+
     def _find_port(self):
-        """auto のとき、127.0.0.1 の候補ポートから ComfyUI を探す。見つからなければ None。"""
-        for port in self.AUTO_PORTS:
-            base = f"http://127.0.0.1:{port}"
+        """auto のとき、この PC で ComfyUI を探す。見つからなければ None。"""
+        for base in self._candidates():
             try:
-                self._stats_ok(base, 0.5)  # 開いていないポートはすぐ断られるので速い
+                self._stats_ok(base, 1)
             except Exception:
                 continue
             if base != self.base:
                 log.info("ComfyUI を %s で見つけた", base)
             return base
         return None
+
+    def _find_process(self):
+        """今の base で待ち受けているプロセスと、デスクトップ版ならアプリ本体を覚えておく (落ちたのか終了したのかの判断用)。"""
+        self.server = self.app = None
+        port = urlsplit(self.base).port
+        try:
+            for c in psutil.net_connections("tcp"):
+                if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port and c.pid:
+                    self.server = psutil.Process(c.pid)
+                    break
+            if self.server is None:
+                log.info("ComfyUI のプロセスが見つからない (ポート %s)", port)
+                return
+            for p in self.server.parents():
+                if "comfy" in p.name().lower():
+                    self.app = p
+                    break
+            log.info("ComfyUI のプロセス: %s (pid %d)%s", self.server.name(), self.server.pid,
+                     f"、アプリ本体 {self.app.name()} (pid {self.app.pid})" if self.app else "")
+        except Exception as e:
+            log.info("ComfyUI のプロセスが調べられない: %s", e)
+
+    def _judge_gone(self):
+        """応答しなくなったとき、落ちたのか (down) 普通に終了したのか (off) を決める。"""
+        with self.lock:
+            running = self.running_pid
+        if running:
+            reason = "ジョブの実行中だった"
+        elif self.server and self.server.is_running():
+            reason = f"プロセス {self.server.name()} は残っている"
+        elif self.app and self.app.is_running():
+            reason = f"アプリ本体 {self.app.name()} は残っている"
+        else:
+            reason = None
+        with self.lock:
+            self.crashed = reason is not None
+        if reason:
+            log.warning("ComfyUI が落ちたとみなす (%s)", reason)
+        else:
+            log.info("ComfyUI は普通に終了したとみなす (待機中で、プロセスも消えた)")
 
     # ---- A. ポーリング
     def poll(self):
@@ -247,12 +306,14 @@ class ComfyMonitor:
             if err is None:
                 if not self.ever_ok or self.fails:
                     log.info("ComfyUI が応答した (%s)", self.base)
+                    self._find_process()
                 self.ever_ok = True
                 self.fails = 0
             else:
                 self.fails += 1
                 if self.ever_ok and self.fails == self.DOWN_FAILS:
-                    log.warning("ComfyUI が応答しなくなった (%s)", err)
+                    log.info("ComfyUI が応答しなくなった (%s)", err)
+                    self._judge_gone()
         if not self.ever_ok or self.fails:
             return
         try:
@@ -370,7 +431,7 @@ class ComfyMonitor:
             if not self.ever_ok:
                 p.update(st="off", q=-1)
             elif self.fails >= self.DOWN_FAILS:
-                p.update(st="down", q=-1)
+                p.update(st="down" if self.crashed else "off", q=-1)
             elif self.running_pid:
                 el = now - self.job_start
                 ws_mine = self.ws_pid == self.running_pid and self.ws_progress_at > 0
