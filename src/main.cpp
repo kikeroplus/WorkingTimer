@@ -269,9 +269,9 @@ uint32_t endAt = 0;    // RUNNING のときの終了時刻 (millis)
 enum ViewMode
 {
   VIEW_DIGITAL,      // 大きな数字で残り時間、下段に時計
-  VIEW_ANALOG_CLOCK, // アナログ時計 + 右に現在時刻の数字
-  VIEW_ANALOG_TIMER, // アナログ時計 + 右に残り時間の数字
-  VIEW_ANALOG_ALL,   // アナログ時計 + 右に残り時間と現在時刻の両方
+  VIEW_ANALOG_CLOCK, // アナログ時計 + 右に現在時刻の数字 (外周は VIEW_DASH_END と同じ終了時刻リング)
+  VIEW_ANALOG_TIMER, // アナログ時計 + 右に残り時間の数字 (同上)
+  VIEW_ANALOG_ALL,   // アナログ時計 + 右に残り時間と現在時刻の両方 (同上)
   VIEW_DASH,         // アナログ時計 + 残り時間・日の入り・ポモドーロ記録・砂時計・今日の豆知識
   VIEW_DASH_END,     // VIEW_DASH の外周リングを「今 → 終了時刻」(1 周 60 分、60 分を超える分は内側) にしたもの。配色も別
   VIEW_MONITOR,      // PC1〜PC3 の負荷・温度と ComfyUI の状態
@@ -279,6 +279,13 @@ enum ViewMode
   VIEW_N
 };
 uint8_t viewMode = VIEW_DIGITAL;
+
+// 外周を終了時刻リングにする (配色も終了の何分前かで決める) 表示か
+bool endRingView()
+{
+  return viewMode == VIEW_ANALOG_CLOCK || viewMode == VIEW_ANALOG_TIMER || viewMode == VIEW_ANALOG_ALL ||
+         viewMode == VIEW_DASH_END;
+}
 
 Preferences prefs;
 
@@ -619,7 +626,7 @@ RGB currentAccent()
 {
   if (state == DONE)
     return C_RED;
-  if (viewMode == VIEW_DASH_END)
+  if (endRingView())
     return endZoneRGB(remaining() / 60000.0f);
   return phaseRGB(totalMs ? (float)remaining() / totalMs : 1.0f);
 }
@@ -898,6 +905,19 @@ void drawAnalogFace(float cx, float cy, float R, RGB accent, float frac, const s
   CIRC(cx, cy, 1, COL_BG);
 }
 
+// 「25 MIN」の代わりに出す終了時刻 "END HH:MM" (右端 right。待機中は今始めたときの時刻)
+void drawEndLabel(int right, int y, const struct tm &t, bool ok)
+{
+  char buf[8] = "--:--";
+  if (ok && state != DONE)
+  {
+    uint32_t e = (t.tm_hour * 3600UL + t.tm_min * 60 + t.tm_sec + (remaining() + 999) / 1000) % 86400;
+    sprintf(buf, "%02lu:%02lu", (unsigned long)(e / 3600), (unsigned long)(e / 60 % 60));
+  }
+  textR(right, y, 1, COL_TEXT, buf);
+  textR(right - textW(buf, 1) - 4, y, 1, COL_DIM, "END");
+}
+
 const int PANEL_X = 160; // 右側パネルの左端
 
 // 右側下段: 日付 (アナログ時計・アナログタイマー共通)
@@ -932,14 +952,13 @@ void drawAnalogLayout()
 
   struct tm t;
   bool ok = getNow(&t);
-  drawAnalogFace(78, 97, 68, accent, frac, t, ok);
+  drawAnalogFace(78, 97, 68, accent, frac, t, ok, endRingView());
 
   // 右側上段: タイマーの状態
   const int px = PANEL_X;
   drawStateLabel(px, 30, accent);
   char buf[24];
-  sprintf(buf, "%u MIN", PRESETS[presetIdx]);
-  textR(314, 34, 1, COL_DIM, buf);
+  drawEndLabel(314, 34, t, ok);
 
   SegStyle med = {21, 44, 5, 6};
   SegStyle small = {10, 17, 3, 3};
@@ -1385,15 +1404,7 @@ void drawDashLayout()
   drawStateLabel(px, 26, accent);
   if (endView)
   {
-    // 「25 MIN」の代わりに終了時刻 (待機中は今始めたときの時刻)
-    strcpy(buf, "--:--");
-    if (ok && state != DONE)
-    {
-      uint32_t e = (t.tm_hour * 3600UL + t.tm_min * 60 + t.tm_sec + (remaining() + 999) / 1000) % 86400;
-      sprintf(buf, "%02lu:%02lu", (unsigned long)(e / 3600), (unsigned long)(e / 60 % 60));
-    }
-    textR(pr, 30, 1, COL_TEXT, buf);
-    textR(pr - textW(buf, 1) - 4, 30, 1, COL_DIM, "END");
+    drawEndLabel(pr, 30, t, ok);
     drawNetStatus(203, 37); // 「END」のぶん幅を取るので少し左へ
   }
   else
