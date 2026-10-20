@@ -802,9 +802,13 @@ void litArc(float cx, float cy, float r0, float r1, float s, float e, uint16_t o
 // 終了時刻リング: 長針と同じく 1 周 60 分で、今の分の位置から終了時刻の分の位置までを光らせる。
 // 60 分後までは外側、それより先は内側 (少し暗く)。どちらの弧も終了時刻の所で終わり、そこに印を付ける。
 // 色は終了の何分前かで決まる (終了前 5 分は赤、その前 10 分は黄、それより前は緑) ので、境目は文字盤の上で止まっている。
-// 待機中は「今始めたら」の予告を暗く出す。一時停止中は終了時刻が後ろへずれていくので、弧は長針と一緒に回る
-void drawEndRing(float cx, float cy, float R, const struct tm &t, bool ok)
+// 待機中は「今始めたら」の予告を暗く出す。一時停止中は終了時刻が後ろへずれていくので、弧は長針と一緒に回る。
+// R は外側の三角の印まで含めた半径で、リングはその内側 END_BEZEL ドットに置く
+const float END_BEZEL = 7; // 終了位置の三角 (ダイバーズウォッチの回転ベゼルの印) を置く幅
+
+void drawEndRing(float cx, float cy, float Ro, const struct tm &t, bool ok)
 {
+  const float R = Ro - END_BEZEL; // リングの外径
   bool show = ok && state != DONE;
   float remMin = remaining() / 60000.0f; // READY のときは設定した時間
   float s = (t.tm_min + t.tm_sec / 60.0f) * 6;
@@ -846,18 +850,26 @@ void drawEndRing(float cx, float cy, float R, const struct tm &t, bool ok)
   {
     float e = s + remMin * 6;
     float x0, y0, x1, y1, dx, dy;
-    polar(cx, cy, R + 1, e, x0, y0);
+    polar(cx, cy, R, e, x0, y0);
     polar(cx, cy, remMin > 60 ? R - 11 : R - 6, e, x1, y1);
     polar(0, 0, 1.0f, e + 90, dx, dy);
-    QUAD(x0 - dx, y0 - dy, x0 + dx, y0 + dy, x1 + dx, y1 + dy, x1 - dx, y1 - dy, state == READY ? COL_DIM : COL_TEXT);
+    uint16_t mc = state == READY ? COL_DIM : COL_TEXT;
+    QUAD(x0 - dx, y0 - dy, x0 + dx, y0 + dy, x1 + dx, y1 + dy, x1 - dx, y1 - dy, mc);
+
+    // リングの外の三角: 底辺が外側、先が終了位置を指す。リングとは 1 ドット離す
+    float ax, ay, bx, by;
+    polar(cx, cy, R + 1.5f, e, ax, ay);
+    polar(cx, cy, Ro, e, bx, by);
+    const float hw = 3.5f; // 底辺の半分の幅 (底辺 7 ドット)
+    TRI(lroundf(ax), lroundf(ay), lroundf(bx - dx * hw), lroundf(by - dy * hw), lroundf(bx + dx * hw), lroundf(by + dy * hw), mc);
   }
 }
 
 // 左側: アナログ時計の文字盤 (外周リングがタイマーの残り)。
-// endRing のときは外周を終了時刻リングにし、内側のリングのぶん目盛りと針を小さくする
+// endRing のときは外周を終了時刻リングにし、外の三角と内側のリングのぶん目盛りと針を小さくする
 void drawAnalogFace(float cx, float cy, float R, RGB accent, float frac, const struct tm &t, bool ok, bool endRing = false)
 {
-  const float Rf = endRing ? R - 5 : R; // 目盛りを置く文字盤の半径
+  const float Rf = endRing ? R - END_BEZEL - 5 : R; // 目盛りを置く文字盤の半径
   const float k = Rf / 68;              // 目盛りや針の長さは半径 68 のときの値を基準に縮める
 
   if (endRing)
