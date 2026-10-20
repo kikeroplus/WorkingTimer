@@ -15,7 +15,7 @@
 #define MQTT_PORT         1883
 #define MQTT_CLIENT_ID    "workingtimer"          // 後ろに MAC の末尾 4 桁を付けて使う (例 workingtimer-A1B2)。同じ ID だと切断を繰り返すので、複数台でも重ならないようにする
 #define MQTT_SUB_TOPIC    "doorbell/call/device3" // 同じ部屋の受信機と同じ (送信機のボタン B)。自分の送る TIMER は無視するのでループしない
-#define MQTT_DONE_TOPIC   "doorbell/call/device3" // タイマー終了時に鳴らす受信機
+#define MQTT_DONE_TOPIC   "doorbell/call/device3" // ALERT_RING_BELL のときに鳴らす受信機 (タイマー終了では送らない。本体のブザーで足りるため)
 #define MQTT_DONE_PAYLOAD "TIMER"
 
 // ---- 液晶の配線 (TFT-VUMeterTester-170-320 と同じ) ----
@@ -383,10 +383,8 @@ char callTime[6] = "--:--";
 const uint32_t CALL_SHOW_MS = 60000; // 呼び出し画面を出しておく時間
 const uint32_t CALL_RING_MS = 30000; // 呼び出し音を鳴らす時間
 
-// ---- 終了通知 (MQTT で TIMER を送る) ----
-bool notifyEnabled = true; // OFF のときは送らない (1 分タイマーのテストで 2 階のベルを鳴らさないため)
-bool donePending = false;  // 送信待ち (終了の瞬間に MQTT が切れていたとき)
-uint32_t donePendingAt = 0;
+// ---- ブザーの ON/OFF ----
+bool buzzerEnabled = true; // OFF のときは終了アラーム・呼び出し・アラートの音を鳴らさない (ボタンのクリック音と切り替えの合図は鳴らす)
 
 // ---- PC の監視 (info/pc/<PC>/status・sys・comfy。仕様は MQTT_TOPICS.md) ----
 const char *PC_NAMES[] = {"PC1", "PC2", "PC3"}; // 台数を変えるときはここだけ直す
@@ -452,6 +450,7 @@ enum : uint8_t
   AL_ERROR = 2,
   AL_DOWN = 4,
   AL_STALLED = 8,
+  AL_BROKER = 16, // BROKER LOST (pc = -1)
   AL_COMFY = AL_ERROR | AL_DOWN | AL_STALLED
 };
 
@@ -480,7 +479,7 @@ uint32_t alarmAt = 0;
 
 // ---- ブザー ----
 uint16_t buzzFreq = 0; // いま鳴らしている周波数 (0 = 止めている)
-uint8_t fbKind = 0;    // 通知 ON/OFF 切り替えの合図音 (0 = なし、1 = ON、2 = OFF)
+uint8_t fbKind = 0;    // ブザー ON/OFF 切り替えの合図音 (0 = なし、1 = ON、2 = OFF)
 uint32_t fbAt = 0;
 
 void beep(uint16_t freq, uint32_t ms)
@@ -500,7 +499,7 @@ void setBuzz(uint16_t freq)
     noTone(BUZZER_PIN);
 }
 
-// 鳴らす音を毎回決め直す。呼び出し音 > アラート > 切り替えの合図 > 終了アラーム の順に優先する
+// 鳴らす音を毎回決め直す。切り替えの合図 > (ブザー ON のとき) 呼び出し音 > アラート > 終了アラーム の順に優先する
 void updateAlarm()
 {
   uint32_t now = millis();
@@ -522,7 +521,19 @@ void updateAlarm()
     alarmAt = now;
   }
 
-  if (callActive)
+  if (fbKind)
+  {
+    uint32_t t = now - fbAt;
+    if (fbKind == 1) // ON: 高音 2 回
+      f = (t < 70 || (t >= 130 && t < 200)) ? 3600 : 0;
+    else // OFF: 低音 1 回
+      f = t < 250 ? 1000 : 0;
+    if (t >= 250)
+      fbKind = 0;
+  }
+  else if (!buzzerEnabled)
+    f = 0; // OFF: 切り替えの合図のほかは鳴らさない
+  else if (callActive)
   {
     // 呼び出し: 「ピン (高) ポーン (低)」を 2.5 秒ごとに繰り返す (終了アラームの 2700Hz ピピピッと聞き分けられるように)
     uint32_t ph = (now - callAt) % 2500;
@@ -540,16 +551,6 @@ void updateAlarm()
       uint32_t ph = t % 800;
       f = ph < 350 ? 784 : (ph >= 400 && ph < 750) ? 587 : 0;
     }
-  }
-  else if (fbKind)
-  {
-    uint32_t t = now - fbAt;
-    if (fbKind == 1) // ON: 高音 2 回
-      f = (t < 70 || (t >= 130 && t < 200)) ? 3600 : 0;
-    else // OFF: 低音 1 回
-      f = t < 250 ? 1000 : 0;
-    if (t >= 250)
-      fbKind = 0;
   }
   else if (alarmOn)
   {
@@ -599,17 +600,17 @@ void drawWifiIcon(int x, int y, uint16_t on, uint16_t off)
   }
 }
 
-// MQTT の接続状態 ("MQ") と終了通知の設定 (ベル)。左端 x、下端 y で幅 22 ドット
+// MQTT の接続状態 ("MQ") とブザーの ON/OFF (ベル)。左端 x、下端 y で幅 22 ドット
 void drawNetStatus(int x, int y)
 {
   // ベル: 丸い頭 + 胴 + 裾 + 舌
   int bx = x, by = y - 8;
-  uint16_t bc = notifyEnabled ? c565(C_AMBER) : COL_DIM;
+  uint16_t bc = buzzerEnabled ? c565(C_AMBER) : COL_DIM;
   CIRC(bx + 4, by + 3, 3, bc);
   FR(bx + 1, by + 3, 7, 4, bc);
   FR(bx, by + 6, 9, 1, bc);
   FR(bx + 3, by + 8, 3, 1, bc);
-  if (!notifyEnabled)
+  if (!buzzerEnabled)
   {
     // OFF は斜線を引く
     for (int i = 0; i < 9; i++)
@@ -2061,15 +2062,13 @@ void closeAlert()
     alertActive = false;
 }
 
-void toggleNotify()
+void toggleBuzzer()
 {
-  notifyEnabled = !notifyEnabled;
-  prefs.putBool("notify", notifyEnabled);
-  if (!notifyEnabled)
-    donePending = false;
-  fbKind = notifyEnabled ? 1 : 2;
+  buzzerEnabled = !buzzerEnabled;
+  prefs.putBool("buzzer", buzzerEnabled);
+  fbKind = buzzerEnabled ? 1 : 2;
   fbAt = millis();
-  Serial.printf("notify: %s\n", notifyEnabled ? "ON" : "OFF");
+  Serial.printf("buzzer: %s\n", buzzerEnabled ? "ON" : "OFF");
 }
 
 void handleButtons()
@@ -2077,7 +2076,7 @@ void handleButtons()
   BtnEvent s = btnSelect.update();
   BtnEvent g = btnStart.update();
 
-  // SELECT と START の同時押し: 1 秒で終了通知の ON/OFF。単独のイベントは出さない
+  // SELECT と START の同時押し: 1 秒でブザーの ON/OFF。単独のイベントは出さない
   static uint32_t comboAt = 0;
   static bool comboFired = false;
   if (btnSelect.pressed && btnStart.pressed)
@@ -2092,7 +2091,7 @@ void handleButtons()
     if (!comboFired && millis() - comboAt >= 1000)
     {
       comboFired = true;
-      toggleNotify();
+      toggleBuzzer();
     }
   }
 
@@ -2404,19 +2403,12 @@ void mqttUpdate()
   static uint32_t lastTry = 0;
   static uint32_t retryMs = 0; // 失敗が続いたら 5 秒から 30 秒まで間隔を延ばす (相手が落ちている間の引っかかりを減らす)
 
-  // 送信待ちは 60 秒過ぎたら捨てる
-  if (donePending && millis() - donePendingAt > 60000)
-  {
-    donePending = false;
-    Serial.println("mqtt: done notify dropped (not connected within 60s)");
-  }
-
   // 2 分以上つながらなければ、軽い音 1 回のアラートを 1 度だけ
   static bool brokerAlerted = false;
   if (!brokerAlerted && brokerLost())
   {
     brokerAlerted = true;
-    raiseAlert("BROKER LOST", "MQTT " MQTT_HOST " NOT REACHABLE", true);
+    raiseAlert("BROKER LOST", "MQTT " MQTT_HOST " NOT REACHABLE", true, -1, AL_BROKER);
   }
 
   if (WiFi.status() != WL_CONNECTED)
@@ -2459,6 +2451,7 @@ void mqttUpdate()
     wasConnected = true;
     retryMs = 5000;
     brokerAlerted = false;
+    retractAlerts(-1, AL_BROKER); // つながり直したら BROKER LOST の画面は消す (履歴には残る)
     // retain で届く古い値を誤報にしないよう、接続のたびに基準値を取り直す
     for (PcInfo &pc : pcs)
       pc.statusBase = pc.comfyBase = false;
@@ -2472,13 +2465,6 @@ void mqttUpdate()
   }
 
   mqtt.loop();
-
-  if (donePending && mqtt.connected())
-  {
-    donePending = false;
-    bool ok = mqtt.publish(MQTT_DONE_TOPIC, MQTT_DONE_PAYLOAD, false); // retain なし (付けると受信機が再起動のたびに鳴る)
-    Serial.printf("mqtt: publish %s %s %s\n", MQTT_DONE_TOPIC, MQTT_DONE_PAYLOAD, ok ? "ok" : "FAILED");
-  }
 }
 
 // 呼び出しを受けたときの処理 (loop() 側)
@@ -2528,7 +2514,7 @@ void setup()
   pomoCount = prefs.getUShort("pCnt", 0);
   pomoMins = prefs.getUShort("pMin", 0);
   pomoStreak = prefs.getUShort("pStrk", 0);
-  notifyEnabled = prefs.getBool("notify", true);
+  buzzerEnabled = prefs.getBool("buzzer", true);
   resetTimer();
 
   // MQTT のバッファはキャンバスの後に確保する
@@ -2559,12 +2545,6 @@ void loop()
     state = DONE;
     alarmPending = true; // 鳴らし始めは updateAlarm() が決める (CALL・アラートの表示中は待つ)
     recordPomodoro();
-    // 終了を呼び出しベルの受信機に知らせる (切断中なら再接続後に送る)
-    if (notifyEnabled)
-    {
-      donePending = true;
-      donePendingAt = millis();
-    }
   }
   updateAlarm();
   updateFact();

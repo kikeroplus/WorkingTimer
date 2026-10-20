@@ -77,7 +77,7 @@ PC の `lost` アラートも同様に、`online` に戻ると消える。
 ## 4. 呼び出しベル（既存）
 
 - `doorbell/call/device2`〜`device5`、ペイロード `ON` / `OFF` / `TIMER`、retain=false。
-- WorkingTimer は `doorbell/call/device3` を購読し（受信機 device3 と同時に反応）、タイマー終了時に同じトピックへ `TIMER` を送る。
+- WorkingTimer は `doorbell/call/device3` を購読し（受信機 device3 と同時に反応）。タイマー終了時に `TIMER` を送るのは 2026-10-20 にやめた（本体にブザーが付き、2 階のベルを鳴らす必要がなくなったため）。
   WorkingTimer のクライアント ID は `workingtimer-XXXX`（XXXX は MAC の末尾 4 桁。受信機の `doorbell_device3` と別で、WorkingTimer を複数台動かしても重ならない）。
 - `device4`・`device5` は空き枠。
 
