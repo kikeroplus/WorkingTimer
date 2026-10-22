@@ -14,9 +14,7 @@
 #define MQTT_HOST         "192.168.11.32"
 #define MQTT_PORT         1883
 #define MQTT_CLIENT_ID    "workingtimer"          // 後ろに MAC の末尾 4 桁を付けて使う (例 workingtimer-A1B2)。同じ ID だと切断を繰り返すので、複数台でも重ならないようにする
-#define MQTT_SUB_TOPIC    "doorbell/call/device3" // 同じ部屋の受信機と同じ (送信機のボタン B)。自分の送る TIMER は無視するのでループしない
-#define MQTT_DONE_TOPIC   "doorbell/call/device3" // ALERT_RING_BELL のときに鳴らす受信機 (タイマー終了では送らない。本体のブザーで足りるため)
-#define MQTT_DONE_PAYLOAD "TIMER"
+#define MQTT_SUB_TOPIC    "doorbell/call/device3" // 同じ部屋の受信機と同じ (送信機のボタン B)。ベルへは何も送らない (受け取るだけ)
 
 // ---- 液晶の配線 (TFT-VUMeterTester-170-320 と同じ) ----
 // GND = GND, VCC = 3.3V, SDA-0(MISO)は未接続
@@ -440,7 +438,6 @@ PcInfo pcs[PC_N];
 uint32_t mqttLostAt = 0; // MQTT が切れた時刻 (起動直後は 0 = 起動時から切れている扱い)
 
 // ---- アラート ----
-const bool ALERT_RING_BELL = false;    // true でアラートのときに MQTT_DONE_TOPIC へ TIMER を送り、ベルも鳴らす
 const uint32_t ALERT_RING_MS = 30000;  // 警告音を鳴らす時間 (画面は解除されるまで残す)
 const int ALERT_QUEUE_N = 4;           // 上位の表示中に保留しておける数
 const int ALERT_HIST_N = 5;            // MONITOR 画面で見られる履歴の数
@@ -2242,9 +2239,6 @@ void raiseAlert(const char *title, const char *detail, bool quiet, int pc = -1, 
     }
     alertQueue[alertQueueN++] = a;
   }
-
-  if (ALERT_RING_BELL && !quiet && mqtt.connected())
-    mqtt.publish(MQTT_DONE_TOPIC, MQTT_DONE_PAYLOAD, false);
 }
 
 // 正常に戻ったので、その PC の該当するアラートを表示中・保留から取り除く (履歴には残す)
