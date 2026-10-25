@@ -8,12 +8,15 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <font/glcdfont.h>
-#include "secrets.h"
+#include "WiFiSetup.h"
+
+// ---- WiFi (起動時に WiFiManager の設定ポータルで設定する。WiFiSetup.h) ----
+#define DEVICE_BASE_NAME   "WorkingTimer" // 後ろに MAC の末尾 4 桁を付けて AP 名・ホスト名・MQTT クライアント ID に使う (例 WorkingTimer-3FA2)
+#define WIFI_PORTAL_SEC    180            // 設定モードの上限。過ぎたらオフラインでタイマーとして動く
+#define MQTT_HOST_DEFAULT  "192.168.11.32" // 設定ページの「MQTT server」欄の初期値。空欄で保存すると MQTT を使わない
 
 // ---- MQTT (呼び出しベルシステムに参加する) ----
-#define MQTT_HOST         "192.168.11.32"
 #define MQTT_PORT         1883
-#define MQTT_CLIENT_ID    "workingtimer"          // 後ろに MAC の末尾 4 桁を付けて使う (例 workingtimer-A1B2)。同じ ID だと切断を繰り返すので、複数台でも重ならないようにする
 #define MQTT_SUB_TOPIC    "doorbell/call/device3" // 同じ部屋の受信機と同じ (送信機のボタン B)。ベルへは何も送らない (受け取るだけ)
 
 // ---- 液晶の配線 (TFT-VUMeterTester-170-320 と同じ) ----
@@ -372,6 +375,22 @@ Button btnStart(BTN_START);
 
 WiFiClient mqttNet;
 PubSubClient mqtt(mqttNet);
+
+String deviceName;            // makeDeviceName() の値 (例 WorkingTimer-3FA2)
+char mqttHost[41] = "";       // 設定ページで保存したブローカー。空なら MQTT を使わない
+const char *setupApName = nullptr; // WiFi の設定モード中は AP 名 (画面を設定モードの表示にする)
+
+bool mqttEnabled() { return mqttHost[0] != 0; }
+
+// 時刻がまだないときの表示。オフライン (設定モードが時間切れ) なら OFFLINE
+const char *netWaitLabel(bool shortForm = false)
+{
+  if (WiFi.status() == WL_CONNECTED)
+    return shortForm ? "NTP.." : "NTP SYNC...";
+  if (wifiSetupOffline())
+    return "OFFLINE";
+  return shortForm ? "WIFI.." : "WIFI...";
+}
 
 // ---- 呼び出し (MQTT で ON を受けたとき) ----
 bool callReq = false;    // MQTT の受信で立てる。処理は loop() 側で行う
@@ -744,7 +763,7 @@ void drawDigitalLayout()
   {
     int w = drawSegText(10, 137, "--:--", mid, COL_GHOST, COL_GHOST);
     drawSegText(10 + w + 8, 150, "--", small, COL_GHOST, COL_GHOST);
-    textR(310, 140, 1, COL_DIM, WiFi.status() == WL_CONNECTED ? "NTP SYNC..." : "WIFI...");
+    textR(310, 140, 1, COL_DIM, netWaitLabel());
   }
   drawWifiIcon(250, 166, c565(C_CYAN), COL_GHOST);
   drawNetStatus(224, 166);
@@ -934,7 +953,7 @@ void drawPanelDate(const struct tm &t, bool ok)
   }
   else
   {
-    text(px, 144, 1, COL_DIM, WiFi.status() == WL_CONNECTED ? "NTP SYNC..." : "WIFI...");
+    text(px, 144, 1, COL_DIM, netWaitLabel());
   }
   drawWifiIcon(298, 167, c565(C_CYAN), COL_GHOST);
   drawNetStatus(272, 167);
@@ -986,7 +1005,7 @@ void drawAnalogLayout()
     {
       int w = drawSegText(px, 125, "--:--", clk, COL_GHOST, COL_GHOST);
       drawSegText(px + w + 6, 138, "--", sec, COL_GHOST, COL_GHOST);
-      textR(314, 130, 1, COL_DIM, WiFi.status() == WL_CONNECTED ? "NTP.." : "WIFI..");
+      textR(314, 130, 1, COL_DIM, netWaitLabel(true));
     }
     drawWifiIcon(298, 167, c565(C_CYAN), COL_GHOST);
     drawNetStatus(272, 167);
@@ -1435,7 +1454,7 @@ void drawDashLayout()
   {
     text(px, 94, 1, COL_DIM, "TO SUNSET");
     text(px, 105, 2, COL_GHOST, "--");
-    text(px, 135, 1, COL_DIM, WiFi.status() == WL_CONNECTED ? "NTP SYNC..." : "WIFI...");
+    text(px, 135, 1, COL_DIM, netWaitLabel());
   }
 
   // 中央右: 今日のポモドーロ数・合計時間・連続日数
@@ -1470,8 +1489,11 @@ void drawDashLayout()
 
 // ---- 画面: MONITOR / WIFI 共通の上部バー ----
 // MQTT が長く切れたままか (このときは PC の情報を信用せず -- にする)
+// MQTT を使わない設定のとき、オフラインで動いているとき (WiFi の設定モードが時間切れ) は数えない
 bool brokerLost()
 {
+  if (!mqttEnabled() || wifiSetupOffline())
+    return false;
   return mqtt.state() != MQTT_CONNECTED && millis() - mqttLostAt >= BROKER_LOST_MS;
 }
 
@@ -1912,7 +1934,7 @@ void drawWifiLayout()
     }
   }
   else
-    text(gx + 20, 80, 1, COL_DIM, conn ? "SCANNING..." : "WIFI...");
+    text(gx + 20, 80, 1, COL_DIM, conn ? "SCANNING..." : netWaitLabel());
   for (int c = 1; c <= WIFI_CH_N; c++)
   {
     sprintf(buf, "%d", c);
@@ -1987,9 +2009,27 @@ void drawAlertOverlay()
   }
 }
 
+// ---- 画面: WiFi の設定モード (設定ポータルの間は止まっているので、一度描くだけ) ----
+void drawSetupLayout()
+{
+  char buf[48];
+  textC(SCREEN_W / 2, 14, 3, c565(C_CYAN), "WIFI SETUP MODE");
+  HL(16, 46, SCREEN_W - 32, COL_LINE);
+  textC(SCREEN_W / 2, 60, 1, COL_DIM, "CONNECT YOUR PHONE TO");
+  textC(SCREEN_W / 2, 74, 3, COL_TEXT, setupApName);
+  textC(SCREEN_W / 2, 112, 2, COL_TEXT, "THEN OPEN 192.168.4.1");
+  snprintf(buf, sizeof(buf), "NO SETUP IN %d MIN -> OFFLINE TIMER", WIFI_PORTAL_SEC / 60);
+  textC(SCREEN_W / 2, 146, 1, COL_DIM, buf);
+}
+
 // ---- 画面全体 ----
 void drawScene()
 {
+  if (setupApName)
+  {
+    drawSetupLayout();
+    return;
+  }
   if (viewMode == VIEW_DIGITAL)
     drawDigitalLayout();
   else if (viewMode == VIEW_DASH || viewMode == VIEW_DASH_END)
@@ -2397,12 +2437,17 @@ void mqttUpdate()
   static uint32_t lastTry = 0;
   static uint32_t retryMs = 0; // 失敗が続いたら 5 秒から 30 秒まで間隔を延ばす (相手が落ちている間の引っかかりを減らす)
 
+  if (!mqttEnabled())
+    return;
+
   // 2 分以上つながらなければ、軽い音 1 回のアラートを 1 度だけ
   static bool brokerAlerted = false;
   if (!brokerAlerted && brokerLost())
   {
     brokerAlerted = true;
-    raiseAlert("BROKER LOST", "MQTT " MQTT_HOST " NOT REACHABLE", true, -1, AL_BROKER);
+    char detail[48];
+    snprintf(detail, sizeof(detail), "MQTT %s NOT REACHABLE", mqttHost);
+    raiseAlert("BROKER LOST", detail, true, -1, AL_BROKER);
   }
 
   if (WiFi.status() != WL_CONNECTED)
@@ -2429,13 +2474,9 @@ void mqttUpdate()
     if (retryMs && millis() - lastTry < retryMs)
       return;
     lastTry = millis();
-    Serial.printf("mqtt: connecting to %s:%d ...\n", MQTT_HOST, MQTT_PORT);
-    static char clientId[24] = "";
-    if (!clientId[0])
-    {
-      uint64_t mac = ESP.getEfuseMac(); // 下位バイトから MAC の 1 バイト目
-      snprintf(clientId, sizeof(clientId), MQTT_CLIENT_ID "-%02X%02X", (uint8_t)(mac >> 32), (uint8_t)(mac >> 40));
-    }
+    Serial.printf("mqtt: connecting to %s:%d ...\n", mqttHost, MQTT_PORT);
+    // クライアント ID は機体ごとに別 (同じ ID の機体が 2 台あると Mosquitto が互いを切断し合う)
+    const char *clientId = deviceName.c_str();
     if (!mqtt.connect(clientId))
     {
       retryMs = retryMs ? min(retryMs * 2, (uint32_t)30000) : 5000;
@@ -2514,23 +2555,47 @@ void setup()
   // MQTT のバッファはキャンバスの後に確保する
   if (!mqtt.setBufferSize(1024))
     Serial.println("mqtt: setBufferSize(1024) failed!");
-  IPAddress broker;
-  broker.fromString(MQTT_HOST);
-  mqtt.setServer(broker, MQTT_PORT);
-  mqtt.setCallback(mqttCallback);
-  mqtt.setSocketTimeout(2); // CONNACK などを待つ上限 (秒)
-  mqttNet.setTimeout(1);    // TCP 接続を待つ上限 (秒)
+
+  // WiFi: 保存済みの WiFi につなぐ。つながらなければ設定モード (SELECT を押しながら起動すると設定を消して設定モード)
+  deviceName = makeDeviceName(DEVICE_BASE_NAME);
+  wifiSetupAddParam("mqtt", "MQTT server (empty = no MQTT)", MQTT_HOST_DEFAULT, 40);
+  renderFrame(); // つなぐ間はいつもの画面 (WIFI...) を出しておく
+  setupWiFi(deviceName.c_str(), [](const char *ap) {
+    setupApName = ap;
+    renderFrame();
+  }, BTN_SELECT, WIFI_PORTAL_SEC);
+  setupApName = nullptr;
+  Serial.printf("device: %s (%s)\n", deviceName.c_str(), deviceDisplayName().c_str());
+
+  strlcpy(mqttHost, wifiSetupGet("mqtt").c_str(), sizeof(mqttHost));
+  if (mqttEnabled())
+  {
+    IPAddress broker;
+    if (broker.fromString(mqttHost))
+      mqtt.setServer(broker, MQTT_PORT);
+    else
+      mqtt.setServer(mqttHost, MQTT_PORT); // 名前で書いたとき (mqttHost は消えない配列なので渡したままでよい)
+    mqtt.setCallback(mqttCallback);
+    mqtt.setSocketTimeout(2); // CONNACK などを待つ上限 (秒)
+    mqttNet.setTimeout(1);    // TCP 接続を待つ上限 (秒)
+    mqttLostAt = millis();    // BROKER LOST の 2 分は WiFi の設定が済んでから数える
+  }
+  else
+    Serial.println("mqtt: disabled (no server set)");
+
+  configTzTime("JST-9", "ntp.nict.jp", "time.google.com", "pool.ntp.org"); // オフラインでも、後でつながれば合う
+
+  // 設定を消すために押した SELECT を、離したときの操作として拾わない
+  if (digitalRead(BTN_SELECT) == LOW)
+    btnSelect.suppress = true;
 
   Serial.printf("heap: free %u\n", ESP.getFreeHeap());
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  configTzTime("JST-9", "ntp.nict.jp", "time.google.com", "pool.ntp.org");
 }
 
 void loop()
 {
   handleButtons();
+  wifiKeepAlive();
   mqttUpdate();
   updateCall();
 
