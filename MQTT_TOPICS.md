@@ -82,7 +82,7 @@ PC の `lost` アラートも同様に、`online` に戻ると消える。
 - WorkingTimer は `doorbell/call/device3` を購読し（受信機 device3 と同時に反応）。
   WorkingTimer のクライアント ID は `WorkingTimer-XXXX`（XXXX は MAC の末尾 4 桁。WiFi 設定ポータルの AP 名・ホスト名と同じ。受信機の `doorbell_device3` と別で、WorkingTimer を複数台動かしても重ならない）。ブローカーのアドレスは WiFi 設定ページの「MQTT server」欄で決める（初期値 `192.168.11.32`、空欄なら MQTT を使わない）。
 - InfoPanel は `doorbell/call/+`（全部）を購読し、`ON` で呼び出しを表示して鳴らし、`OFF` で閉じる。`TIMER` は記録だけ。
-  InfoPanel のクライアント ID は `infopanel-XXXX`（同上。複数台でも重ならない）。
+  InfoPanel のクライアント ID は `InfoPanel-XXXX`（同上。WiFi 設定ポータルの AP 名・ホスト名と同じで、複数台でも重ならない）。ブローカーのアドレスは WiFi 設定ページの「MQTT server」欄で決める（初期値 `192.168.11.32`、空欄なら MQTT を使わない）。
 - `device4`・`device5` は空き枠。
 
 ## 5. アラートの責任分担
