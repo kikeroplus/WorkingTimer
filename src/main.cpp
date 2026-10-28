@@ -270,12 +270,13 @@ uint32_t endAt = 0;    // RUNNING のときの終了時刻 (millis)
 enum ViewMode
 {
   VIEW_DIGITAL,      // 大きな数字で残り時間、下段に時計
-  VIEW_ANALOG_CLOCK, // アナログ時計 + 右に現在時刻の数字 (外周は VIEW_DASH_END と同じ終了時刻リング)
-  VIEW_ANALOG_TIMER, // アナログ時計 + 右に残り時間の数字 (同上)
-  VIEW_ANALOG_ALL,   // アナログ時計 + 右に残り時間と現在時刻の両方 (同上)
-  VIEW_DASH,         // アナログ時計 + 現在時刻・日の入り・ポモドーロ記録・砂時計・今日の豆知識 (外周は終了時刻リング)
+  // アナログ時計の外周は、どの表示も終了時刻リング (endRingView)
+  VIEW_ANALOG_CLOCK, // アナログ時計 + 右に現在時刻の数字
+  VIEW_ANALOG_TIMER, // アナログ時計 + 右に残り時間の数字
+  VIEW_ANALOG_ALL,   // アナログ時計 + 右の上に現在時刻 (大)、下に残り時間 (小) とバー・曜日・日付
+  VIEW_DASH,         // 小さいアナログ時計 + 現在時刻・日の入り・ポモドーロ記録・砂時計・今日の豆知識
   VIEW_DASH_END,     // VIEW_DASH の数字を残り時間にし、「MIN」の代わりに終了時刻を出したもの
-  VIEW_MONITOR,      // PC1〜PC3 の負荷・温度と ComfyUI の状態
+  VIEW_MONITOR,      // PC1〜PC3 の負荷・温度・VRAM と ComfyUI の状態
   VIEW_WIFI,         // 2.4GHz の混み具合 (ch ごとの棒グラフと強い AP)
   VIEW_N
 };
@@ -869,23 +870,13 @@ void drawEndRing(float cx, float cy, float R, const struct tm &t, bool ok)
   }
 }
 
-// 左側: アナログ時計の文字盤 (外周リングがタイマーの残り)。
-// endRing のときは外周を終了時刻リングにし、内側のリングのぶん目盛りと針を小さくする
-void drawAnalogFace(float cx, float cy, float R, RGB accent, float frac, const struct tm &t, bool ok, bool endRing = false)
+// 左側: アナログ時計の文字盤。外周は終了時刻リングで、内側のリングのぶん目盛りと針を小さくする
+void drawAnalogFace(float cx, float cy, float R, const struct tm &t, bool ok)
 {
-  const float Rf = endRing ? R - 5 : R; // 目盛りを置く文字盤の半径
-  const float k = Rf / 68;              // 目盛りや針の長さは半径 68 のときの値を基準に縮める
+  const float Rf = R - 5;  // 目盛りを置く文字盤の半径
+  const float k = Rf / 68; // 目盛りや針の長さは半径 68 のときの値を基準に縮める
 
-  if (endRing)
-    drawEndRing(cx, cy, R, t, ok);
-  else
-  {
-    // 外周: タイマーの残りを 60 区画のリングで表示
-    int litN = (int)ceilf(frac * 60);
-    uint16_t ringOn = timerDigitColor(accent);
-    for (int i = 0; i < 60; i++)
-      ringSeg(cx, cy, R - 5, R, i * 6 + 1.0f, i * 6 + 5.0f, (state != DONE && i < litN) ? ringOn : COL_GHOST);
-  }
+  drawEndRing(cx, cy, R, t, ok);
 
   // 目盛り
   for (int i = 0; i < 60; i++)
@@ -969,7 +960,7 @@ void drawAnalogLayout()
 
   struct tm t;
   bool ok = getNow(&t);
-  drawAnalogFace(78, 97, 68, accent, frac, t, ok, endRingView());
+  drawAnalogFace(78, 97, 68, t, ok);
 
   // 右側上段: タイマーの状態
   const int px = PANEL_X;
@@ -1418,7 +1409,7 @@ void drawDashLayout()
   struct tm t;
   bool ok = getNow(&t);
   bool endView = viewMode == VIEW_DASH_END;
-  drawAnalogFace(62, 84, 58, accent, frac, t, ok, true);
+  drawAnalogFace(62, 84, 58, t, ok);
 
   // 中央上: 状態と、現在時刻 (VIEW_DASH) か残り時間 (VIEW_DASH_END)
   const int px = 128, pr = 278;
