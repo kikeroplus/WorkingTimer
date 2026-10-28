@@ -273,8 +273,8 @@ enum ViewMode
   VIEW_ANALOG_CLOCK, // アナログ時計 + 右に現在時刻の数字 (外周は VIEW_DASH_END と同じ終了時刻リング)
   VIEW_ANALOG_TIMER, // アナログ時計 + 右に残り時間の数字 (同上)
   VIEW_ANALOG_ALL,   // アナログ時計 + 右に残り時間と現在時刻の両方 (同上)
-  VIEW_DASH,         // アナログ時計 + 残り時間・日の入り・ポモドーロ記録・砂時計・今日の豆知識
-  VIEW_DASH_END,     // VIEW_DASH の外周リングを「今 → 終了時刻」(1 周 60 分、60 分を超える分は内側) にしたもの。配色も別
+  VIEW_DASH,         // アナログ時計 + 現在時刻・日の入り・ポモドーロ記録・砂時計・今日の豆知識 (外周は終了時刻リング)
+  VIEW_DASH_END,     // VIEW_DASH の数字を残り時間にし、「MIN」の代わりに終了時刻を出したもの
   VIEW_MONITOR,      // PC1〜PC3 の負荷・温度と ComfyUI の状態
   VIEW_WIFI,         // 2.4GHz の混み具合 (ch ごとの棒グラフと強い AP)
   VIEW_N
@@ -285,7 +285,7 @@ uint8_t viewMode = VIEW_DIGITAL;
 bool endRingView()
 {
   return viewMode == VIEW_ANALOG_CLOCK || viewMode == VIEW_ANALOG_TIMER || viewMode == VIEW_ANALOG_ALL ||
-         viewMode == VIEW_DASH_END;
+         viewMode == VIEW_DASH || viewMode == VIEW_DASH_END;
 }
 
 Preferences prefs;
@@ -982,31 +982,35 @@ void drawAnalogLayout()
 
   if (viewMode == VIEW_ANALOG_ALL)
   {
-    // 残り時間 (数字) + バー
-    formatRemain(buf, rem);
-    drawSegText(px, 50, buf, med, timerDigitColor(accent), COL_GHOST);
-    drawSegBar(px, 101, 154, 10, 19, frac, accent);
-    HL(px, 118, 154, COL_LINE);
-
-    // 現在時刻 (時:分 + 秒) と曜日・日付
-    SegStyle clk = {15, 28, 4, 4};
+    // 上: 現在時刻 (時:分を大きく + 秒)
     SegStyle sec = {9, 15, 3, 2};
     if (ok)
     {
       sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
-      int w = drawSegText(px, 125, buf, clk, COL_CLOCK, COL_GHOST);
+      int w = drawSegText(px, 48, buf, med, COL_CLOCK, COL_GHOST);
       sprintf(buf, "%02d", t.tm_sec);
-      drawSegText(px + w + 6, 138, buf, sec, COL_SEC, COL_GHOST);
-      textR(314, 125, 2, COL_SEC, WDAY[t.tm_wday]);
-      sprintf(buf, "%02d.%02d", t.tm_mon + 1, t.tm_mday);
-      textR(314, 143, 1, COL_TEXT, buf);
+      drawSegText(px + w + 6, 77, buf, sec, COL_SEC, COL_GHOST);
     }
     else
     {
-      int w = drawSegText(px, 125, "--:--", clk, COL_GHOST, COL_GHOST);
-      drawSegText(px + w + 6, 138, "--", sec, COL_GHOST, COL_GHOST);
-      textR(314, 130, 1, COL_DIM, netWaitLabel(true));
+      int w = drawSegText(px, 48, "--:--", med, COL_GHOST, COL_GHOST);
+      drawSegText(px + w + 6, 77, "--", sec, COL_GHOST, COL_GHOST);
     }
+    HL(px, 99, 154, COL_LINE);
+
+    // 下: 残り時間 (小さめの数字) + バー、右に曜日・日付
+    SegStyle rest = {15, 28, 4, 4};
+    formatRemain(buf, rem);
+    drawSegText(px, 106, buf, rest, timerDigitColor(accent), COL_GHOST);
+    if (ok)
+    {
+      textR(314, 106, 2, COL_SEC, WDAY[t.tm_wday]);
+      sprintf(buf, "%02d.%02d", t.tm_mon + 1, t.tm_mday);
+      textR(314, 124, 1, COL_TEXT, buf);
+    }
+    else
+      textR(314, 112, 1, COL_DIM, netWaitLabel(true));
+    drawSegBar(px, 142, 154, 10, 19, frac, accent);
     drawWifiIcon(298, 167, c565(C_CYAN), COL_GHOST);
     drawNetStatus(272, 167);
     return;
@@ -1414,9 +1418,9 @@ void drawDashLayout()
   struct tm t;
   bool ok = getNow(&t);
   bool endView = viewMode == VIEW_DASH_END;
-  drawAnalogFace(62, 84, 58, accent, frac, t, ok, endView);
+  drawAnalogFace(62, 84, 58, accent, frac, t, ok, true);
 
-  // 中央上: 状態と残り時間
+  // 中央上: 状態と、現在時刻 (VIEW_DASH) か残り時間 (VIEW_DASH_END)
   const int px = 128, pr = 278;
   drawStateLabel(px, 26, accent);
   if (endView)
@@ -1430,9 +1434,19 @@ void drawDashLayout()
     textR(pr, 30, 1, COL_DIM, buf);
     drawNetStatus(207, 37); // このレイアウトには WiFi アイコンがないので、状態ラベルと「MIN」の間に置く
   }
-  formatRemain(buf, rem);
   SegStyle med = {18, 36, 5, 5};
-  drawSegText(px, 46, buf, med, timerDigitColor(accent), COL_GHOST);
+  if (endView)
+  {
+    formatRemain(buf, rem);
+    drawSegText(px, 46, buf, med, timerDigitColor(accent), COL_GHOST);
+  }
+  else if (ok)
+  {
+    sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
+    drawSegText(px, 46, buf, med, COL_CLOCK, COL_GHOST);
+  }
+  else
+    drawSegText(px, 46, "--:--", med, COL_GHOST, COL_GHOST);
   HL(px, 89, pr - px, COL_LINE);
 
   // 中央左: 日の入り (日没後と夜明け前は日の出) までの時間
@@ -1731,13 +1745,11 @@ void drawPcRow(int i, int y0)
     text(hx, y0 + 5, 1, COL_DIM, "NO DATA");
   else
   {
-    char buf[16];
+    // VRAM は使用率のバーだけ (CPU・GPU と同じ形)
     text(hx, y0 + 5, 1, COL_DIM, "VRAM");
-    if (p.vram >= 0 && p.vramTot > 0)
-      sprintf(buf, "%.1f/%.0f", p.vram, p.vramTot);
-    else
-      strcpy(buf, "--");
-    text(hx + 27, y0 + 5, 1, COL_TEXT, buf);
+    FR(hx + 27, y0 + 5, 30, 7, COL_GHOST);
+    if (p.vram > 0 && p.vramTot > 0)
+      FR(hx + 27, y0 + 5, (int)lroundf(30 * min(p.vram / p.vramTot, 1.0f)), 7, c565(C_CYAN));
   }
 
   // 2 行目: ComfyUI
