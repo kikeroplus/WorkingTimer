@@ -77,19 +77,21 @@ PC の `lost` アラートも同様に、`online` に戻ると消える。
 ## 4. 呼び出しベル（既存）
 
 - `doorbell/call/device2`〜`device5`、ペイロード `ON` / `OFF` / `TIMER`、retain=false。
-- **WorkingTimer・InfoPanel はベルに何も送らない（受け取るだけ）。** 鳴らすのは送信機だけ。
+- **WorkingTimer・InfoPanel・Livico はベルに何も送らない（受け取るだけ）。** 鳴らすのは送信機だけ。
   タイマー終了の `TIMER` は 2026-10-20 に、アラート時に送る機能（`ALERT_RING_BELL`）は 2026-10-22 に廃止した（どちらの端末にもブザーが付き、2 階のベルを鳴らす必要がなくなったため）。
 - WorkingTimer は `doorbell/call/device3` を購読し（受信機 device3 と同時に反応）。
   WorkingTimer のクライアント ID は `WorkingTimer-XXXX`（XXXX は MAC の末尾 4 桁。WiFi 設定ポータルの AP 名・ホスト名と同じ。受信機の `doorbell_device3` と別で、WorkingTimer を複数台動かしても重ならない）。ブローカーのアドレスは WiFi 設定ページの「MQTT server」欄で決める（初期値 `192.168.11.32`、空欄なら MQTT を使わない）。
 - InfoPanel は `doorbell/call/+`（全部）を購読し、`ON` で呼び出しを表示して鳴らし、`OFF` で閉じる。`TIMER` は記録だけ。
   InfoPanel のクライアント ID は `InfoPanel-XXXX`（同上。WiFi 設定ポータルの AP 名・ホスト名と同じで、複数台でも重ならない）。ブローカーのアドレスは WiFi 設定ページの「MQTT server」欄で決める（初期値 `192.168.11.32`、空欄なら MQTT を使わない）。
+- Livico（タイマーと PC の情報を 1 画面に出す端末。2026-11-01 追加）も `doorbell/call/+` を購読し、InfoPanel と同じく `ON` で呼び出しを表示して鳴らし（動いているタイマーは一時停止）、`OFF` で閉じる。`TIMER` は無視する。
+  クライアント ID は `Livico-XXXX`（同上）。ブローカーのアドレスも同じく WiFi 設定ページの「MQTT server」欄で決める。
 - `device4`・`device5` は空き枠。
 
 ## 5. アラートの責任分担
 
-アラート（画面・ブザー）の判断は **すべて表示端末（WorkingTimer・InfoPanel の ESP32）側で行う**。
+アラート（画面・ブザー）の判断は **すべて表示端末（WorkingTimer・InfoPanel・Livico の ESP32）側で行う**。
 PC が落ちたら PC 自身は何も送れないため。PC エージェントは状態を正直に送るだけで、ベルを直接鳴らさない。
 
-- WorkingTimer と InfoPanel は**同じ条件**でアラートを出し、それぞれ自分のブザーで鳴らす（両方で鳴ってよい。2026-10-21 に決定）。
+- WorkingTimer と InfoPanel は**同じ条件**でアラートを出し、それぞれ自分のブザーで鳴らす（両方で鳴ってよい。2026-10-21 に決定）。Livico も同じ条件で、自分のスピーカーで鳴らす（2026-11-01）。
   条件：PC の `online` → `lost`、ComfyUI の `error` / `down` / `stalled` への変化。接続後の最初の値（retain）は基準値なので出さない。正常に戻ると画面から消える。
-- どちらの端末も**ベルは鳴らさない**（4 章）。
+- どの端末も**ベルは鳴らさない**（4 章）。
