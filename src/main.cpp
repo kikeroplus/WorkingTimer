@@ -276,7 +276,8 @@ enum ViewMode
   VIEW_ANALOG_ALL,   // アナログ時計 + 右の上に現在時刻 (大)、下に残り時間 (小) とバー・曜日・日付
   VIEW_DASH,         // 小さいアナログ時計 + 現在時刻・日の入り・ポモドーロ記録・砂時計・今日の豆知識
   VIEW_DASH_END,     // VIEW_DASH の数字を残り時間にし、「MIN」の代わりに終了時刻を出したもの
-  VIEW_MONITOR,      // PC1〜PC3 の負荷・温度・VRAM と ComfyUI の状態
+  VIEW_SUNSET,       // 日没までの時間と、日没前アラームの設定 (外周は今 → 日没の 12 時間リング)
+  VIEW_MONITOR,     // PC1〜PC3 の負荷・温度・VRAM と ComfyUI の状態
   VIEW_WIFI,         // 2.4GHz の混み具合 (ch ごとの棒グラフと強い AP)
   VIEW_N
 };
@@ -468,6 +469,7 @@ enum : uint8_t
   AL_DOWN = 4,
   AL_STALLED = 8,
   AL_BROKER = 16, // BROKER LOST (pc = -1)
+  AL_SUNSET = 32, // 日没前アラーム (pc = -1)。音と色を警告と変える
   AL_COMFY = AL_ERROR | AL_DOWN | AL_STALLED
 };
 
@@ -516,6 +518,66 @@ void setBuzz(uint16_t freq)
     noTone(BUZZER_PIN);
 }
 
+// 日没前アラームのメロディー: 3 曲を続けて 1 回ずつ (周波数 Hz・長さ ms。周波数 0 は休み)。どれも著作権切れ
+struct Note
+{
+  uint16_t f, ms;
+};
+const uint16_t AKA_B = 420;  // 赤とんぼの 1 拍
+const uint16_t NANA_Q = 500; // 七つの子の 4 分音符
+const uint16_t IEJI_Q = 600; // 家路の 4 分音符 (ゆっくり)
+const Note SUN_MELODY[] = {
+    // 1. 赤とんぼ (山田耕筰) の 1 番。ハ長調、3/4 拍子。ソ = G5、ド = C6、ド↑ = C7
+    // ゆう やけ こ やけ の  (ソ ド ド レ | ミ ソ ド↑ ラ | ソ)
+    {784, AKA_B / 2}, {1047, AKA_B * 3 / 2}, {1047, AKA_B / 2}, {1175, AKA_B}, {1319, AKA_B}, {1568, AKA_B}, {2093, AKA_B / 2}, {1760, AKA_B / 2}, {1568, AKA_B * 5 / 2},
+    // あか とん ぼ  (ラ ド ド レ | ミ)
+    {880, AKA_B / 2}, {1047, AKA_B * 3 / 2}, {1047, AKA_B / 2}, {1175, AKA_B}, {1319, AKA_B * 5 / 2},
+    // おわ れて みた のは  (ミ ソ ド↑ ラ | ソ ラ ソ ミ)
+    {1319, AKA_B / 2}, {1568, AKA_B}, {2093, AKA_B * 3 / 2}, {1760, AKA_B / 2}, {1568, AKA_B}, {1760, AKA_B / 2}, {1568, AKA_B / 2}, {1319, AKA_B},
+    // いつ の ひ か  (ソ ミ ド ミ | レ ド)
+    {1568, AKA_B}, {1319, AKA_B / 2}, {1047, AKA_B / 2}, {1319, AKA_B}, {1175, AKA_B}, {1047, AKA_B * 2},
+    {0, 1500},
+
+    // 2. 七つの子 (本居長世) の前半 8 小節。ト長調、4/4 拍子を 2 オクターブ上げて鳴らす (音名は元の譜面のもの)
+    // からす なぜなくの  (シ ラソ ラ | シソミソ レ)
+    {1976, NANA_Q}, {1760, NANA_Q / 2}, {1568, NANA_Q / 2}, {1760, NANA_Q * 2},
+    {1976, NANA_Q / 2}, {1568, NANA_Q / 2}, {1319, NANA_Q / 2}, {1568, NANA_Q / 2}, {1175, NANA_Q * 2},
+    // からすは やまに  (ミレシレ ミ ソ | ラ)
+    {1319, NANA_Q / 2}, {1175, NANA_Q / 2}, {988, NANA_Q / 2}, {1175, NANA_Q / 2}, {1319, NANA_Q}, {1568, NANA_Q},
+    {1760, NANA_Q * 3}, {0, NANA_Q},
+    // かわいい ななつの  (シ. ド レ シ | レ ミレ シ ソ)
+    {1976, NANA_Q * 3 / 2}, {2093, NANA_Q / 2}, {2349, NANA_Q}, {1976, NANA_Q},
+    {2349, NANA_Q}, {2637, NANA_Q / 2}, {2349, NANA_Q / 2}, {1976, NANA_Q}, {1568, NANA_Q},
+    // こがあるからよ  (ララシソ ミ レ | ソ)
+    {1760, NANA_Q / 2}, {1760, NANA_Q / 2}, {1976, NANA_Q / 2}, {1568, NANA_Q / 2}, {1319, NANA_Q}, {1175, NANA_Q},
+    {1568, NANA_Q * 3},
+    {0, 1500},
+
+    // 3. 家路 (ドボルザーク「新世界より」第 2 楽章) の最初の 8 小節。ハ長調、4/4 拍子。ド = C6
+    // 遠き 山に 日は 落ちて  (ミ. ソ ソ | ミ. レ ド | レ ミ ソ ミ | レ)
+    {1319, IEJI_Q * 3 / 2}, {1568, IEJI_Q / 2}, {1568, IEJI_Q * 2},
+    {1319, IEJI_Q * 3 / 2}, {1175, IEJI_Q / 2}, {1047, IEJI_Q * 2},
+    {1175, IEJI_Q}, {1319, IEJI_Q}, {1568, IEJI_Q}, {1319, IEJI_Q},
+    {1175, IEJI_Q * 4},
+    // 星は 空を ちりばめぬ  (ミ. ソ ソ | ミ. レ ド | レ ミ レ. ド | ド)
+    {1319, IEJI_Q * 3 / 2}, {1568, IEJI_Q / 2}, {1568, IEJI_Q * 2},
+    {1319, IEJI_Q * 3 / 2}, {1175, IEJI_Q / 2}, {1047, IEJI_Q * 2},
+    {1175, IEJI_Q}, {1319, IEJI_Q}, {1175, IEJI_Q * 3 / 2}, {1047, IEJI_Q / 2},
+    {1047, IEJI_Q * 4},
+};
+
+// メロディーの始まりから t ms の音 (終わったら 0)。音の終わりを少し切って、同じ高さが続いても粒が分かるようにする
+uint16_t melodyFreq(const Note *m, int n, uint32_t t)
+{
+  for (int i = 0; i < n; i++)
+  {
+    if (t < m[i].ms)
+      return t < m[i].ms - 30 ? m[i].f : 0;
+    t -= m[i].ms;
+  }
+  return 0;
+}
+
 // 鳴らす音を毎回決め直す。切り替えの合図 > (ブザー ON のとき) 呼び出し音 > アラート > 終了アラーム の順に優先する
 void updateAlarm()
 {
@@ -560,7 +622,9 @@ void updateAlarm()
   else if (alertActive && alertCur.shownAt)
   {
     uint32_t t = now - alertCur.shownAt;
-    if (alertCur.quiet)
+    if (alertCur.kind == AL_SUNSET)
+      f = melodyFreq(SUN_MELODY, sizeof(SUN_MELODY) / sizeof(SUN_MELODY[0]), t); // 日没前: 赤とんぼ → 七つの子 → 家路を 1 回ずつ (約 50 秒)
+    else if (alertCur.quiet)
       f = t < 200 ? 880 : 0; // 軽い音 1 回
     else if (t < ALERT_RING_MS)
     {
@@ -870,13 +934,62 @@ void drawEndRing(float cx, float cy, float R, const struct tm &t, bool ok)
   }
 }
 
-// 左側: アナログ時計の文字盤。外周は終了時刻リングで、内側のリングのぶん目盛りと針を小さくする
-void drawAnalogFace(float cx, float cy, float R, const struct tm &t, bool ok)
+// ---- 日没前アラーム (SUNSET 画面で何分前かを選ぶ。どの画面を出していても鳴る) ----
+const uint8_t SUN_ALARM_MIN[] = {30, 45, 60, 90, 120, 0}; // 0 = OFF
+const int SUN_ALARM_N = sizeof(SUN_ALARM_MIN) / sizeof(SUN_ALARM_MIN[0]);
+uint8_t sunAlarmIdx = 2;  // 既定は 60 分前
+int32_t sunAlarmDay = -1; // 鳴らした日 (todayIndex)。設定を変えたら -1 に戻し、その日もう一度鳴らせるようにする
+bool sunTestReq = false;  // SUNSET 画面の START 長押しで試し鳴らし (出すのは loop() 側)
+
+float sunMinutes(int yday, bool rise);
+
+uint8_t sunAlarmMin() { return SUN_ALARM_MIN[sunAlarmIdx]; }
+float nowMinutes(const struct tm &t) { return t.tm_hour * 60 + t.tm_min + t.tm_sec / 60.0f; }
+
+// 次の日没 (今日の日没を過ぎていたら明日の日没) を、今日の 0 時からの分で
+float nextSunset(const struct tm &t, float now)
+{
+  float set = sunMinutes(t.tm_yday, false);
+  return now < set ? set : sunMinutes(t.tm_yday + 1, false) + 1440;
+}
+
+// 日没リング: 時針と同じく 1 周 12 時間で、今の位置から日没の位置までを光らせる。
+// アラームの時刻 (日没の n 分前) から日没までは赤、それより前はアンバー。12 時間より先の日没は出さない
+void drawSunRing(float cx, float cy, float R, const struct tm &t, bool ok)
+{
+  for (int i = 0; i < 60; i++)
+    ringSeg(cx, cy, R - 5, R, i * 6 + 1.0f, i * 6 + 5.0f, COL_GHOST);
+  if (!ok)
+    return;
+  float now = nowMinutes(t), left = nextSunset(t, now) - now;
+  if (left > 720)
+    return;
+  float s = fmodf(now, 720) / 2; // 1 分 = 0.5 度
+  float a = sunAlarmMin() ? max(left - sunAlarmMin(), 0.0f) : left; // 今からアラームまでの分
+  if (a > 0)
+    litArc(cx, cy, R - 5, R, s, s + a / 2, c565(C_AMBER));
+  if (left > a)
+    litArc(cx, cy, R - 5, R, s + a / 2, s + left / 2, COL_RED);
+
+  // 日没の位置に、リングを横切る白い線
+  float e = s + left / 2;
+  float x0, y0, x1, y1, dx, dy;
+  polar(cx, cy, R + 1, e, x0, y0);
+  polar(cx, cy, R - 6, e, x1, y1);
+  polar(0, 0, 1.0f, e + 90, dx, dy);
+  QUAD(x0 - dx, y0 - dy, x0 + dx, y0 + dy, x1 + dx, y1 + dy, x1 - dx, y1 - dy, COL_TEXT);
+}
+
+// 左側: アナログ時計の文字盤。外周は終了時刻リング (sunRing のときは日没リング) で、内側のリングのぶん目盛りと針を小さくする
+void drawAnalogFace(float cx, float cy, float R, const struct tm &t, bool ok, bool sunRing = false)
 {
   const float Rf = R - 5;  // 目盛りを置く文字盤の半径
   const float k = Rf / 68; // 目盛りや針の長さは半径 68 のときの値を基準に縮める
 
-  drawEndRing(cx, cy, R, t, ok);
+  if (sunRing)
+    drawSunRing(cx, cy, R, t, ok);
+  else
+    drawEndRing(cx, cy, R, t, ok);
 
   // 目盛り
   for (int i = 0; i < 60; i++)
@@ -1056,6 +1169,85 @@ void formatSpan(char *buf, int mins)
     sprintf(buf, "%dh%02dm", mins / 60, mins % 60);
   else
     sprintf(buf, "%dm", mins);
+}
+
+// ---- 画面: 日没 ----
+// 上の段: 日没の何分前に鳴らすか (OFF もある)
+void drawSunChips()
+{
+  const int pitch = SCREEN_W / SUN_ALARM_N;
+  for (int i = 0; i < SUN_ALARM_N; i++)
+  {
+    int x = i * pitch + 2, w = pitch - 4, y = 3, h = 16;
+    char buf[8];
+    if (SUN_ALARM_MIN[i])
+      sprintf(buf, "%u", SUN_ALARM_MIN[i]);
+    else
+      strcpy(buf, "OFF");
+    if (i == sunAlarmIdx)
+    {
+      RR(x, y, w, h, 4, c565(C_AMBER));
+      textC(x + w / 2, y + 5, 1, COL_BG, buf);
+    }
+    else
+    {
+      DRR(x, y, w, h, 4, COL_LINE);
+      textC(x + w / 2, y + 5, 1, COL_DIM, buf);
+    }
+  }
+}
+
+void drawSunsetLayout()
+{
+  drawSunChips();
+
+  struct tm t;
+  bool ok = getNow(&t);
+  drawAnalogFace(78, 97, 68, t, ok, true);
+
+  // 右側上段: 現在時刻 (時:分 + 秒)
+  const int px = PANEL_X;
+  char buf[16];
+  SegStyle clk = {21, 44, 5, 6};
+  SegStyle sec = {9, 15, 3, 2};
+  if (ok)
+  {
+    sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
+    int w = drawSegText(px, 28, buf, clk, COL_CLOCK, COL_GHOST);
+    sprintf(buf, "%02d", t.tm_sec);
+    drawSegText(px + w + 6, 57, buf, sec, COL_SEC, COL_GHOST);
+  }
+  else
+  {
+    int w = drawSegText(px, 28, "--:--", clk, COL_GHOST, COL_GHOST);
+    drawSegText(px + w + 6, 57, "--", sec, COL_GHOST, COL_GHOST);
+  }
+  HL(px, 80, 154, COL_LINE);
+
+  // 右側下段: 日没までの時間・日没の時刻・アラームの時刻
+  text(px, 88, 1, COL_DIM, "TO SUNSET");
+  drawNetStatus(292, 96);
+  text(px, 134, 1, COL_DIM, "SUNSET");
+  text(px, 154, 1, COL_DIM, "ALARM");
+  if (!ok)
+  {
+    text(px, 100, 3, COL_GHOST, "--");
+    textR(314, 130, 1, COL_DIM, netWaitLabel(true));
+    return;
+  }
+  float now = nowMinutes(t), set = nextSunset(t, now);
+  uint8_t n = sunAlarmMin();
+  formatSpan(buf, (int)ceilf(set - now));
+  text(px, 100, 3, (n && set - now <= n) ? COL_RED : c565(C_AMBER), buf);
+  formatMinutes(buf, "", set);
+  textR(314, 130, 2, COL_TEXT, buf);
+  if (n)
+  {
+    formatMinutes(buf, "", set - n);
+    textR(314, 150, 2, now >= set - n ? COL_DIM : c565(C_AMBER), buf); // 過ぎたら暗く
+  }
+  else
+    textR(314, 150, 2, COL_DIM, "OFF");
 }
 
 // ---- ポモドーロの記録 ----
@@ -1761,7 +1953,7 @@ void drawAlertHistory()
     const Alert &a = alertHist[i];
     int y = 34 + i * 27;
     text(4, y + 3, 1, COL_DIM, a.at);
-    text(40, y, 2, a.quiet ? c565(C_AMBER) : COL_RED, a.title);
+    text(40, y, 2, (a.quiet || a.kind == AL_SUNSET) ? c565(C_AMBER) : COL_RED, a.title);
     char buf[48];
     fitText(buf, sizeof(buf), a.detail, (SCREEN_W - 40) / 6);
     text(40, y + 16, 1, COL_TEXT, buf);
@@ -1993,13 +2185,21 @@ void drawCallOverlay()
   textC(SCREEN_W / 2, y + 66, 2, COL_TEXT, callTime);
 }
 
-// ---- 画面: アラート (CALL と同じ重ね表示。赤背景) ----
+// ---- 画面: アラート (CALL と同じ重ね表示。赤背景、日没前アラームはアンバーの背景) ----
 void drawAlertOverlay()
 {
   const int x = 8, y = 34, w = 304, h = 102, b = 3;
   bool on = blinkOn();
-  RR(x, y, w, h, 8, on ? COL_RED : c565(140, 20, 30));
-  RR(x + b, y + b, w - 2 * b, h - 2 * b, 6, c565(70, 8, 14));
+  if (alertCur.kind == AL_SUNSET)
+  {
+    RR(x, y, w, h, 8, on ? c565(C_AMBER) : c565(140, 90, 0));
+    RR(x + b, y + b, w - 2 * b, h - 2 * b, 6, c565(70, 40, 0));
+  }
+  else
+  {
+    RR(x, y, w, h, 8, on ? COL_RED : c565(140, 20, 30));
+    RR(x + b, y + b, w - 2 * b, h - 2 * b, 6, c565(70, 8, 14));
+  }
   textC(SCREEN_W / 2, y + 14, 3, COL_TEXT, alertCur.title);
   textC(SCREEN_W / 2, y + 50, 1, COL_TEXT, alertCur.detail);
   textC(SCREEN_W / 2, y + 70, 2, c565(255, 200, 200), alertCur.at);
@@ -2037,6 +2237,8 @@ void drawScene()
     drawDigitalLayout();
   else if (viewMode == VIEW_DASH || viewMode == VIEW_DASH_END)
     drawDashLayout();
+  else if (viewMode == VIEW_SUNSET)
+    drawSunsetLayout();
   else if (viewMode == VIEW_MONITOR)
     drawMonitorLayout();
   else if (viewMode == VIEW_WIFI)
@@ -2152,6 +2354,14 @@ void handleButtons()
     monitorHistory = !monitorHistory;
     beep(3200, 25);
   }
+  else if (s == EV_SHORT && viewMode == VIEW_SUNSET)
+  {
+    // SUNSET 画面では SELECT 短押しで日没前アラームの分を選ぶ (タイマーの動作中でも変えられる)
+    sunAlarmIdx = (sunAlarmIdx + 1) % SUN_ALARM_N;
+    sunAlarmDay = -1;
+    prefs.putUChar("sunAlm", sunAlarmIdx);
+    beep(3200, 25);
+  }
   else if (s == EV_SHORT && state != RUNNING)
   {
     presetIdx = (presetIdx + 1) % PRESET_N;
@@ -2188,6 +2398,8 @@ void handleButtons()
       break;
     }
   }
+  else if (g == EV_LONG && viewMode == VIEW_SUNSET)
+    sunTestReq = true; // SUNSET 画面では START 長押しで日没前アラームの試し鳴らし (タイマーはリセットしない)
   else if (g == EV_LONG)
   {
     resetTimer();
@@ -2529,6 +2741,30 @@ void updateCall()
     alertCur.shownAt = millis() | 1; // 0 は「まだ」の意味なので避ける
 }
 
+// 日没の n 分前になったらアラートを出す (1 日 1 回。その 1 分の間に起動していなければ鳴らさない)
+void updateSunAlarm()
+{
+  if (sunTestReq)
+  {
+    sunTestReq = false;
+    raiseAlert("SUNSET TEST", "PRESS A BUTTON TO STOP", false, -1, AL_SUNSET);
+  }
+
+  uint8_t n = sunAlarmMin();
+  int32_t today = todayIndex();
+  struct tm t;
+  if (!n || today < 0 || today == sunAlarmDay || !getNow(&t))
+    return;
+  float now = nowMinutes(t), set = sunMinutes(t.tm_yday, false);
+  if (now < set - n || now >= set - n + 1)
+    return;
+  sunAlarmDay = today;
+  char title[20], detail[24];
+  sprintf(title, "SUNSET -%u MIN", n);
+  formatMinutes(detail, "SUNSET ", set);
+  raiseAlert(title, detail, false, -1, AL_SUNSET);
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -2553,6 +2789,7 @@ void setup()
   pomoMins = prefs.getUShort("pMin", 0);
   pomoStreak = prefs.getUShort("pStrk", 0);
   buzzerEnabled = prefs.getBool("buzzer", true);
+  sunAlarmIdx = prefs.getUChar("sunAlm", sunAlarmIdx) % SUN_ALARM_N;
   resetTimer();
 
   // MQTT のバッファはキャンバスの後に確保する
@@ -2601,6 +2838,7 @@ void loop()
   wifiKeepAlive();
   mqttUpdate();
   updateCall();
+  updateSunAlarm();
 
   if (state == RUNNING && remaining() == 0)
   {

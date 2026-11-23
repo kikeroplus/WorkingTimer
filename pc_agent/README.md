@@ -202,6 +202,7 @@ Start-ScheduledTask -TaskName "WorkingTimer PC Agent"
 | MONITOR 画面にその PC が出ない (`--` のまま) | エージェントが動いているか ([3. 普段の操作](#3-普段の操作))。ログに「MQTT つながった」があるか。`pc_name` が PC1〜PC3 のどれかになっているか (それ以外の名前は WorkingTimer が無視する) |
 | ログに「MQTT につながらない」が続く | ラズパイが動いているか。`config.toml` の `broker` が `192.168.11.32` か |
 | つながったり切れたりを 1 秒おきに繰り返し、WorkingTimer で何度も LOST が出る | **2 台に同じ `pc_name` を付けている** (2026-10-17 に PC1・PC2 で実際に起きた。見本の `PC1` のまま動かしていたと見られる)。同じクライアント ID を Mosquitto が取り合わせ、切られるたびに `lost` が出る。各 PC の `config.toml` を見直し、直した PC で `py agent.py --stop` → `Start-ScheduledTask` する。ログに「接続してすぐ切れるのを繰り返している」と警告が出る。ラズパイの `/var/log/mosquitto/mosquitto.log` で、同じ `pcagent_PCx` が 2 つの IP から交互に来ていれば確定 |
+| Windows を入れ直した後、タスクは動いているはずなのにデータが来ない | ライブラリが入っていない (Python を入れ直すと消える。`pythonw` なのでエラーも見えない)。`py -m pip install -r requirements.txt` をやって `Start-ScheduledTask` (2026-11-05 に PC2 で実際に起きた) |
 | 起動してすぐ終わる・ログに「pc_name が空」 | `config.toml` の `pc_name` を書いていない |
 | ComfyUI を起動しているのに `COMFY OFF` | `config.toml` の `comfy_url` が古い見本の `"http://127.0.0.1:8188"` のままになっていないか (デスクトップ版は 8000〜)。`"auto"` にして動かし直す。ログに「ComfyUI を http://…:8000 で見つけた」と出れば OK。auto でも見つからないときは、ブラウザで ComfyUI を開いたときのポートを見て、8000〜8009・8188 以外なら URL を直接書く |
 | CPU 温度が `--` | LibreHardwareMonitor が **管理者で** 動いているか。http://127.0.0.1:8085/data.json が開けるか |
