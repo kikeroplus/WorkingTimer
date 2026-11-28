@@ -220,6 +220,17 @@ int drawSegText(int x, int y, const char *s, const SegStyle &st, uint16_t on, ui
   return x - x0 - st.sp;
 }
 
+// 現在時刻の "HH:MM"。0〜9 時は時の 1 桁目の 0 をグレーにする。描いた幅を返す
+int drawClockHM(int x, int y, int hour, int min, const SegStyle &st, uint16_t on, uint16_t off)
+{
+  char buf[8];
+  sprintf(buf, "%02d:%02d", hour, min);
+  if (hour >= 10)
+    return drawSegText(x, y, buf, st, on, off);
+  drawSegText(x, y, "0", st, COL_DIM, off);
+  return st.w + st.sp + drawSegText(x + st.w + st.sp, y, buf + 1, st, on, off);
+}
+
 // ---- セグメント式のバー ----
 void drawSegBar(int x, int y, int w, int h, int n, float frac, RGB col)
 {
@@ -816,8 +827,7 @@ void drawDigitalLayout()
   SegStyle small = {10, 17, 3, 3};
   if (ok)
   {
-    sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
-    int w = drawSegText(10, 137, buf, mid, COL_CLOCK, COL_GHOST);
+    int w = drawClockHM(10, 137, t.tm_hour, t.tm_min, mid, COL_CLOCK, COL_GHOST);
     sprintf(buf, "%02d", t.tm_sec);
     drawSegText(10 + w + 8, 150, buf, small, COL_SEC, COL_GHOST);
     sprintf(buf, "%04d.%02d.%02d", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
@@ -1090,8 +1100,7 @@ void drawAnalogLayout()
     SegStyle sec = {9, 15, 3, 2};
     if (ok)
     {
-      sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
-      int w = drawSegText(px, 48, buf, med, COL_CLOCK, COL_GHOST);
+      int w = drawClockHM(px, 48, t.tm_hour, t.tm_min, med, COL_CLOCK, COL_GHOST);
       sprintf(buf, "%02d", t.tm_sec);
       drawSegText(px + w + 6, 77, buf, sec, COL_SEC, COL_GHOST);
     }
@@ -1129,8 +1138,7 @@ void drawAnalogLayout()
   else if (ok)
   {
     // 右側の数字は現在時刻
-    sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
-    int w = drawSegText(px, 54, buf, med, COL_CLOCK, COL_GHOST);
+    int w = drawClockHM(px, 54, t.tm_hour, t.tm_min, med, COL_CLOCK, COL_GHOST);
     sprintf(buf, "%02d", t.tm_sec);
     drawSegText(px + w + 7, 81, buf, small, COL_SEC, COL_GHOST);
   }
@@ -1212,8 +1220,7 @@ void drawSunsetLayout()
   SegStyle sec = {9, 15, 3, 2};
   if (ok)
   {
-    sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
-    int w = drawSegText(px, 28, buf, clk, COL_CLOCK, COL_GHOST);
+    int w = drawClockHM(px, 28, t.tm_hour, t.tm_min, clk, COL_CLOCK, COL_GHOST);
     sprintf(buf, "%02d", t.tm_sec);
     drawSegText(px + w + 6, 57, buf, sec, COL_SEC, COL_GHOST);
   }
@@ -1624,10 +1631,7 @@ void drawDashLayout()
     drawSegText(px, 46, buf, med, timerDigitColor(accent), COL_GHOST);
   }
   else if (ok)
-  {
-    sprintf(buf, "%02d:%02d", t.tm_hour, t.tm_min);
-    drawSegText(px, 46, buf, med, COL_CLOCK, COL_GHOST);
-  }
+    drawClockHM(px, 46, t.tm_hour, t.tm_min, med, COL_CLOCK, COL_GHOST);
   else
     drawSegText(px, 46, "--:--", med, COL_GHOST, COL_GHOST);
   HL(px, 89, pr - px, COL_LINE);
